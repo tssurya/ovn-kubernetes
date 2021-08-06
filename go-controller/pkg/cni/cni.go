@@ -99,7 +99,7 @@ func (pr *PodRequest) cmdAdd(kubeAuth *KubeAPIAuth, podLister corev1listers.PodL
 	if namespace == "" || podName == "" {
 		return nil, fmt.Errorf("required CNI variable missing")
 	}
-
+	klog.Infof("OVN-K Workshop 3: CNIAdd case %s/%s", namespace, podName)
 	kubecli := &kube.Kube{KClient: kclient}
 	annotCondFn := isOvnReady
 
@@ -113,6 +113,7 @@ func (pr *PodRequest) cmdAdd(kubeAuth *KubeAPIAuth, podLister corev1listers.PodL
 	}
 	// Get the IP address and MAC address of the pod
 	// for Smart-Nic, ensure connection-details is present
+	klog.Infof("OVN-K Workshop 3: Check if %s annotation exits")
 	podUID, annotations, err := GetPodAnnotations(pr.ctx, podLister, kclient, namespace, podName, annotCondFn)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get pod annotation: %v", err)
@@ -233,7 +234,7 @@ func HandleCNIRequest(request *PodRequest, podLister corev1listers.PodLister, us
 	var result []byte
 	var err error
 
-	klog.Infof("%s %s starting CNI request %+v", request, request.Command, request)
+	klog.Infof("OVN-K Workshop 3: %s %s starting CNI request %+v", request, request.Command, request)
 	switch request.Command {
 	case CNIAdd:
 		result, err = request.cmdAdd(kubeAuth, podLister, useOVSExternalIDs, kclient)
@@ -243,7 +244,7 @@ func HandleCNIRequest(request *PodRequest, podLister corev1listers.PodLister, us
 		result, err = request.cmdCheck(podLister, useOVSExternalIDs, kclient)
 	default:
 	}
-	klog.Infof("%s %s finished CNI request %+v, result %q, err %v", request, request.Command, request, string(result), err)
+	klog.Infof("OVN-K Workshop 3: %s %s finished CNI request %+v, result %q, err %v", request, request.Command, request, string(result), err)
 
 	if err != nil {
 		// Prefix errors with request info for easier failure debugging
