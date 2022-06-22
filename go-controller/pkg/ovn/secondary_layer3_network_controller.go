@@ -289,7 +289,7 @@ func (oc *SecondaryLayer3NetworkController) Cleanup(netName string) error {
 
 	// remove hostsubnet annotation for this network
 	klog.Infof("Remove node-subnets annotation for network %s on all nodes", netName)
-	existingNodes, err := oc.watchFactory.GetNodes()
+	existingNodes, err := oc.GetLocalZoneNodes()
 	if err != nil {
 		klog.Errorf("Error in initializing/fetching subnets: %v", err)
 		return nil
