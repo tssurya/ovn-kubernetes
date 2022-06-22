@@ -14,6 +14,7 @@ import (
 
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/kube"
+	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
 )
 
 // This handles the annotations used by the node to pass information about its local
@@ -78,6 +79,7 @@ const (
 
 	OvnNodeId               = "k8s.ovn.org/ovn-node-id"
 	ovnTransitSwitchPortIps = "k8s.ovn.org/ovn-node-transit-switch-port-ips"
+	ovnNodeZoneName         = "k8s.ovn.org/ovn-zone"
 )
 
 type L3GatewayConfig struct {
@@ -624,4 +626,17 @@ func UpdateNodeTransitSwitchPortAddressesAnnotation(annotations map[string]strin
 		return nil, err
 	}
 	return annotations, nil
+}
+
+func GetNodeZone(node *kapi.Node) string {
+	zoneName, ok := node.Annotations[ovnNodeZoneName]
+	if !ok {
+		return types.OvnDefaultZone
+	}
+
+	return zoneName
+}
+
+func SetNodeZone(nodeAnnotator kube.Annotator, zoneName string) error {
+	return nodeAnnotator.Set(ovnNodeZoneName, zoneName)
 }
