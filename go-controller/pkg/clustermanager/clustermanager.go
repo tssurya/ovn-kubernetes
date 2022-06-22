@@ -3,8 +3,10 @@ package clustermanager
 import (
 	"context"
 	"fmt"
+	"math/big"
 	"net"
 	"os"
+	"strconv"
 	"sync"
 	"time"
 
@@ -16,6 +18,7 @@ import (
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/retry"
 	"k8s.io/klog/v2"
+	utilnet "k8s.io/utils/net"
 
 	hotypes "github.com/ovn-org/ovn-kubernetes/go-controller/hybrid-overlay/pkg/types"
 	houtil "github.com/ovn-org/ovn-kubernetes/go-controller/hybrid-overlay/pkg/util"
@@ -24,6 +27,7 @@ import (
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/factory"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/kube"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/metrics"
+	bitmapallocator "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/ovn/ipallocator/allocator"
 	objretry "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/retry"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
@@ -32,6 +36,12 @@ import (
 const (
 	OvnNodeAnnotationRetryInterval = 100 * time.Millisecond
 	OvnNodeAnnotationRetryTimeout  = 1 * time.Second
+
+	transitSwitchv4Cidr = "169.254.0.0/16"
+	transitSwitchv6Cidr = "fd97::/64"
+
+	// Maximum node Ids that can be generated. Limited to maximum nodes supported by k8s.
+	maxNodeIds = 5000
 )
 
 type ClusterManager struct {
@@ -50,6 +60,16 @@ type ClusterManager struct {
 
 	// retry framework for nodes
 	retryNodes *objretry.RetryFramework
+
+	nodeIdBitmap    *bitmapallocator.AllocationBitmap
+	nodeIdCache     map[string]int
+	nodeIdCacheLock sync.Mutex
+
+	transitSwitchv4Cidr   *net.IPNet
+	transitSwitchBasev4Ip *big.Int
+
+	transitSwitchv6Cidr   *net.IPNet
+	transitSwitchBasev6Ip *big.Int
 }
 
 // NewOvnController creates a new OVN controller for creating logical network
@@ -67,6 +87,12 @@ func NewClusterManager(ovnClient *util.OVNClientset, wf *factory.WatchFactory, s
 	if config.HybridOverlay.Enabled {
 		hybridOverlaySubnetAllocator = subnetallocator.NewHostSubnetAllocator()
 	}
+
+	nodeIdBitmap := bitmapallocator.NewContiguousAllocationMap(maxNodeIds, "nodeIds")
+	_, _ = nodeIdBitmap.Allocate(0)
+
+	_, tsv4Cidr, _ := net.ParseCIDR(transitSwitchv4Cidr)
+	_, tsv6Cidr, _ := net.ParseCIDR(transitSwitchv6Cidr)
 	cm := &ClusterManager{
 		client:                       ovnClient.KubeClient,
 		kube:                         kube,
@@ -76,6 +102,12 @@ func NewClusterManager(ovnClient *util.OVNClientset, wf *factory.WatchFactory, s
 		clusterSubnetAllocator:       subnetallocator.NewHostSubnetAllocator(),
 		hybridOverlaySubnetAllocator: hybridOverlaySubnetAllocator,
 		recorder:                     recorder,
+		nodeIdBitmap:                 nodeIdBitmap,
+		nodeIdCache:                  make(map[string]int),
+		transitSwitchBasev4Ip:        utilnet.BigForIP(tsv4Cidr.IP),
+		transitSwitchv4Cidr:          tsv4Cidr,
+		transitSwitchBasev6Ip:        utilnet.BigForIP(tsv6Cidr.IP),
+		transitSwitchv6Cidr:          tsv4Cidr,
 	}
 
 	cm.initRetryFramework()
@@ -300,7 +332,10 @@ func (cm *ClusterManager) addUpdateNodeEvent(node *kapi.Node) error {
 	return cm.addNode(node)
 }
 
-func (cm *ClusterManager) updateNodeAnnotationWithRetry(nodeName string, hostSubnets []*net.IPNet) error {
+func (cm *ClusterManager) updateNodeAnnotationWithRetry(
+	nodeName string, hostSubnets []*net.IPNet,
+	nodeTransitSwitchPortIps []*net.IPNet,
+	nodeId int) error {
 	// Retry if it fails because of potential conflict which is transient. Return error in the
 	// case of other errors (say temporary API server down), and it will be taken care of by the
 	// retry mechanism.
@@ -317,6 +352,18 @@ func (cm *ClusterManager) updateNodeAnnotationWithRetry(nodeName string, hostSub
 			return fmt.Errorf("failed to update node %q annotation subnet %s",
 				node.Name, util.JoinIPNets(hostSubnets, ","))
 		}
+
+		if nodeId != -1 {
+			cnode.Annotations[util.OvnNodeId] = strconv.Itoa(nodeId)
+		}
+
+		if nodeTransitSwitchPortIps != nil {
+			cnode.Annotations, err = util.UpdateNodeTransitSwitchPortAddressesAnnotation(cnode.Annotations, nodeTransitSwitchPortIps)
+			if err != nil {
+				return fmt.Errorf("failed to update node %q annotation transit port ips %s",
+					node.Name, util.JoinIPNets(nodeTransitSwitchPortIps, ","))
+			}
+		}
 		return cm.kube.PatchNode(node, cnode)
 	})
 	if resultErr != nil {
@@ -326,6 +373,7 @@ func (cm *ClusterManager) updateNodeAnnotationWithRetry(nodeName string, hostSub
 }
 
 func (cm *ClusterManager) addNode(node *kapi.Node) error {
+	var allocatedNodeId int = -1
 	existingSubnets, err := util.ParseNodeHostSubnetAnnotation(node, types.DefaultNetworkName)
 	if err != nil && !util.IsAnnotationNotSetError(err) {
 		// Log the error and try to allocate new subnets
@@ -337,23 +385,25 @@ func (cm *ClusterManager) addNode(node *kapi.Node) error {
 		return err
 	}
 
-	if len(allocatedSubnets) == 0 {
-		return nil
-	}
-
 	// Release the allocation on error
 	defer func() {
 		if err != nil {
 			if errR := cm.clusterSubnetAllocator.ReleaseNodeSubnets(node.Name, allocatedSubnets...); errR != nil {
 				klog.Warningf("Error releasing node %s subnets: %v", node.Name, errR)
 			}
+			cm.removeNodeId(node.Name, allocatedNodeId)
 		}
 	}()
 
-	// Set the HostSubnet annotation on the node object to signal
-	// to nodes that their logical infrastructure is set up and they can
-	// proceed with their initialization
-	return cm.updateNodeAnnotationWithRetry(node.Name, hostSubnets)
+	allocatedNodeId, _, err = cm.allocateNodeId(node)
+	if err != nil {
+		return err
+	}
+
+	// Generate v4 and v6 transit switch port IPs for the node.
+	nodeTransitSwitchPortIps := cm.syncNodeTransitSwitchPortIps(node, allocatedNodeId)
+
+	return cm.updateNodeAnnotationWithRetry(node.Name, hostSubnets, nodeTransitSwitchPortIps, allocatedNodeId)
 }
 
 func (cm *ClusterManager) deleteNode(node *kapi.Node) error {
@@ -362,6 +412,8 @@ func (cm *ClusterManager) deleteNode(node *kapi.Node) error {
 	}
 
 	cm.clusterSubnetAllocator.ReleaseAllNodeSubnets(node.Name)
+	nodeId := util.GetNodeId(node)
+	cm.removeNodeId(node.Name, nodeId)
 	return nil
 }
 
@@ -415,4 +467,122 @@ func shouldUpdateNode(node, oldNode *kapi.Node) (bool, error) {
 	}
 
 	return true, nil
+}
+
+func (cm *ClusterManager) removeNodeId(nodeName string, nodeId int) {
+	klog.Infof("Deleting node %q ID %d", nodeName, nodeId)
+	if nodeId != -1 {
+		cm.nodeIdBitmap.Release(nodeId)
+	}
+	delete(cm.nodeIdCache, nodeName)
+}
+
+func (cm *ClusterManager) allocateNodeId(node *kapi.Node) (int, bool, error) {
+	cm.nodeIdCacheLock.Lock()
+	defer func() {
+		cm.nodeIdCacheLock.Unlock()
+	}()
+
+	var nodeId int
+	nodeId = util.GetNodeId(node)
+
+	nodeIdInCache, ok := cm.nodeIdCache[node.Name]
+	if !ok {
+		nodeIdInCache = -1
+	}
+
+	if nodeIdInCache != -1 && nodeId != nodeIdInCache {
+		return nodeIdInCache, true, nil
+	}
+
+	if nodeIdInCache == -1 && nodeId != -1 {
+		cm.nodeIdCache[node.Name] = nodeId
+		return nodeId, false, nil
+	}
+
+	// We need to allocate the node id.
+	if nodeIdInCache == -1 && nodeId == -1 {
+		var allocated bool
+		nodeId, allocated, _ = cm.nodeIdBitmap.AllocateNext()
+		if allocated {
+			cm.nodeIdCache[node.Name] = nodeId
+		} else {
+			return -1, false, fmt.Errorf("failed to allocate id for the node %q", node.Name)
+		}
+
+		return nodeId, true, nil
+	}
+
+	return nodeId, false, nil
+}
+
+func (cm *ClusterManager) syncRequiredTransitSwitchPortIps(nodeTransitSwitchPortIps []*net.IPNet, allocatedTransitSwitchPortIps []*net.IPNet) bool {
+	if nodeTransitSwitchPortIps == nil || allocatedTransitSwitchPortIps == nil {
+		return true
+	}
+
+	if len(nodeTransitSwitchPortIps) != len(allocatedTransitSwitchPortIps) {
+		return true
+	}
+
+	nodeTransitPortv4Ips := 0
+	nodeTransitPortv6Ips := 0
+	allocatedPortv4Ips := 0
+	allocatedPortv6Ips := 0
+
+	for _, ip := range nodeTransitSwitchPortIps {
+		if utilnet.IsIPv4(ip.IP) {
+			nodeTransitPortv4Ips++
+		} else {
+			nodeTransitPortv6Ips++
+		}
+	}
+
+	for _, ip := range allocatedTransitSwitchPortIps {
+		if utilnet.IsIPv4(ip.IP) {
+			allocatedPortv4Ips++
+		} else {
+			allocatedPortv6Ips++
+		}
+	}
+
+	if nodeTransitPortv4Ips != allocatedPortv4Ips || nodeTransitPortv6Ips != allocatedPortv6Ips {
+		return true
+	}
+
+	for _, nodeIp := range nodeTransitSwitchPortIps {
+		allocatedIpFound := false
+		for _, allocatedIp := range allocatedTransitSwitchPortIps {
+			if nodeIp.String() == allocatedIp.String() {
+				allocatedIpFound = true
+			}
+		}
+
+		if !allocatedIpFound {
+			return true
+		}
+	}
+
+	return false
+}
+
+func (cm *ClusterManager) syncNodeTransitSwitchPortIps(node *kapi.Node, nodeId int) []*net.IPNet {
+	var transitSwitchPortIps []*net.IPNet
+
+	parsedTransitSwitchPortIps, _ := util.ParseNodeTransitSwitchPortAddresses(node)
+	if config.IPv4Mode {
+		nodeTransitSwitchPortv4Ip := utilnet.AddIPOffset(cm.transitSwitchBasev4Ip, nodeId)
+		transitSwitchPortIps = append(transitSwitchPortIps, &net.IPNet{IP: nodeTransitSwitchPortv4Ip, Mask: cm.transitSwitchv4Cidr.Mask})
+	}
+
+	if config.IPv6Mode {
+		nodeTransitSwitchPortv6Ip := utilnet.AddIPOffset(cm.transitSwitchBasev6Ip, nodeId)
+		transitSwitchPortIps = append(transitSwitchPortIps, &net.IPNet{IP: nodeTransitSwitchPortv6Ip, Mask: cm.transitSwitchv6Cidr.Mask})
+	}
+
+	if cm.syncRequiredTransitSwitchPortIps(parsedTransitSwitchPortIps, transitSwitchPortIps) {
+		return transitSwitchPortIps
+	} else {
+		return nil
+	}
 }

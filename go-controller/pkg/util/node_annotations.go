@@ -75,6 +75,9 @@ const (
 	// capacity for each node. It is set by
 	// openshift/cloud-network-config-controller
 	cloudEgressIPConfigAnnotationKey = "cloud.network.openshift.io/egress-ipconfig"
+
+	OvnNodeId               = "k8s.ovn.org/ovn-node-id"
+	ovnTransitSwitchPortIps = "k8s.ovn.org/ovn-node-transit-switch-port-ips"
 )
 
 type L3GatewayConfig struct {
@@ -560,4 +563,65 @@ func NoHostSubnet(node *kapi.Node) bool {
 
 	nodeSelector, _ := metav1.LabelSelectorAsSelector(config.Kubernetes.NoHostSubnetNodes)
 	return nodeSelector.Matches(labels.Set(node.Labels))
+}
+
+func GetNodeId(node *kapi.Node) int {
+	nodeId, ok := node.Annotations[OvnNodeId]
+	if !ok {
+		return -1
+	}
+
+	id, err := strconv.Atoi(nodeId)
+	if err != nil {
+		return -1
+	}
+	return id
+}
+
+// ParseNodeTransitSwitchPortAddresses returns the parsed transit switch node IPs.
+func ParseNodeTransitSwitchPortAddresses(node *kapi.Node) ([]*net.IPNet, error) {
+	transitSwitchIpsAnnotation, ok := node.Annotations[ovnTransitSwitchPortIps]
+	if !ok {
+		return nil, newAnnotationNotSetError("%s annotation not found for node %q", ovnNodeHostAddresses, node.Name)
+	}
+
+	var ipaddrStrs []string
+	if err := json.Unmarshal([]byte(transitSwitchIpsAnnotation), &ipaddrStrs); err != nil {
+		return nil, fmt.Errorf("error unmarshalling %q value: %v", ovnTransitSwitchPortIps, err)
+	}
+
+	var ips []*net.IPNet
+	for _, ipStr := range ipaddrStrs {
+		ip, ipNet, err := net.ParseCIDR(ipStr)
+		if err != nil {
+			return nil, fmt.Errorf("error parsing %q value: %v", ovnTransitSwitchPortIps, err)
+		}
+		ips = append(ips, &net.IPNet{IP: ip, Mask: ipNet.Mask})
+	}
+	return ips, nil
+}
+
+func updateTransitSwitchPortAddressesAnnotation(annotations map[string]string, annotationName string, tsPortIps []*net.IPNet) error {
+	ipaddrStrs := make([]string, len(tsPortIps))
+	for i, ip := range tsPortIps {
+		ipaddrStrs[i] = ip.String()
+	}
+	bytes, err := json.Marshal(ipaddrStrs)
+	if err != nil {
+		return err
+	}
+
+	annotations[annotationName] = string(bytes)
+	return nil
+}
+
+func UpdateNodeTransitSwitchPortAddressesAnnotation(annotations map[string]string, tsPortIps []*net.IPNet) (map[string]string, error) {
+	if annotations == nil {
+		annotations = map[string]string{}
+	}
+	err := updateTransitSwitchPortAddressesAnnotation(annotations, ovnTransitSwitchPortIps, tsPortIps)
+	if err != nil {
+		return nil, err
+	}
+	return annotations, nil
 }
