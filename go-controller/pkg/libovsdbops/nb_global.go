@@ -62,3 +62,37 @@ func UpdateNBGlobalSetOptions(nbClient libovsdbclient.Client, nbGlobal *nbdb.NBG
 	_, err = m.CreateOrUpdate(opModel)
 	return err
 }
+
+// DebugCreateorUpdateNBGlobal creates or updates NB_Global row.  Used only for testing.
+// Do not call this function from other places.
+// ovn-northd will create NB_Global singleton row in real deployments.
+func DebugCreateorUpdateNBGlobal(nbClient libovsdbclient.Client, nbGlobal *nbdb.NBGlobal) error {
+	opModel := operationModel{
+		Model:          nbGlobal,
+		OnModelUpdates: onModelUpdatesAllNonDefault(),
+		ErrNotFound:    false,
+		BulkOp:         false,
+	}
+
+	m := newModelClient(nbClient)
+	_, err := m.CreateOrUpdate(opModel)
+	return err
+}
+
+// DebugDeleteNBGlobal deletes the NB_Global row.  Used only for testing.
+// Do not call this function from other places.
+// ovn-northd will create NB_Global singleton row in real deployments.
+func DebugDeleteNBGlobal(nbClient libovsdbclient.Client, nbGlobal *nbdb.NBGlobal) error {
+	opModel := []operationModel{
+		{
+			Model:          nbGlobal,
+			ModelPredicate: func(item *nbdb.NBGlobal) bool { return true },
+			ErrNotFound:    false,
+			BulkOp:         false,
+		},
+	}
+
+	m := newModelClient(nbClient)
+	err := m.Delete(opModel...)
+	return err
+}
