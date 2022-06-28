@@ -143,6 +143,9 @@ type DefaultNetworkController struct {
 
 	//List of nodes which belong to the local zone (stored as a sync map)
 	localZoneNodes sync.Map
+
+	// Enable interconnect support or not
+	interconnectSupport bool
 }
 
 // NewDefaultNetworkController creates a new OVN controller for creating logical network
@@ -199,6 +202,7 @@ func newDefaultNetworkControllerCommon(cnci *CommonNetworkControllerInfo,
 		svcController:            svcController,
 		svcFactory:               svcFactory,
 		egressSvcController:      egressSvcController,
+		interconnectSupport:      config.EnableInterconnect,
 	}
 
 	oc.initRetryFramework()
