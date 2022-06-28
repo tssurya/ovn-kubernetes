@@ -326,6 +326,8 @@ func (oc *DefaultNetworkController) syncGatewayLogicalNetwork(node *kapi.Node, l
 		}
 	}
 
+	// Store node's GR IPs as annotations to be used by the interconnect
+	err = oc.addNodeGRIPsAnnotations(node, gwLRPIPs)
 	return err
 }
 
@@ -367,6 +369,33 @@ func (oc *DefaultNetworkController) ensureNodeLogicalNetwork(node *kapi.Node, ho
 	}
 
 	return oc.createNodeLogicalSwitch(node.Name, hostSubnets, oc.loadBalancerGroupUUID)
+}
+
+// Copied from updateNodeAnnotationWithRetry.
+func (oc *DefaultNetworkController) addNodeGRIPsAnnotations(node *kapi.Node, grIPs []*net.IPNet) error {
+	// Retry if it fails because of potential conflict which is transient. Return error in the
+	// case of other errors (say temporary API server down), and it will be taken care of by the
+	// retry mechanism.
+	resultErr := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		// Informer cache should not be mutated, so get a copy of the object
+		node, err := oc.watchFactory.GetNode(node.Name)
+		if err != nil {
+			return err
+		}
+
+		cnode := node.DeepCopy()
+		cnode.Annotations, err = util.UpdateNodeGRIPsAnnotation(cnode.Annotations, grIPs)
+		if err != nil {
+			return fmt.Errorf("failed to marshal node %q annotation for GR IPs %s",
+				node.Name, util.JoinIPNets(grIPs, ","))
+		}
+		return oc.kube.PatchNode(node, cnode)
+	})
+	if resultErr != nil {
+		return fmt.Errorf("failed to update node %s Gateway router IPs annotation", node.Name)
+	}
+
+	return nil
 }
 
 func (oc *DefaultNetworkController) updateNodeAnnotationWithRetry(nodeName string) error {
