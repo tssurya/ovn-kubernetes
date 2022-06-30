@@ -324,9 +324,30 @@ func getLocalGatewayNATRules(ifname string, cidr *net.IPNet) []iptRule {
 	}
 }
 
+func getSharedGatewayNATRules(cidr *net.IPNet) []iptRule {
+	// Allow packets to/from the gateway interface in case defaults deny
+	protocol := getIPTablesProtocol(cidr.IP.String())
+	return []iptRule{
+		{
+			table: "nat",
+			chain: "POSTROUTING",
+			args: []string{
+				"-s", cidr.String(),
+				"-j", "MASQUERADE",
+			},
+			protocol: protocol,
+		},
+	}
+}
+
 // initLocalGatewayNATRules sets up iptables rules for interfaces
 func initLocalGatewayNATRules(ifname string, cidr *net.IPNet) error {
 	return addIptRules(getLocalGatewayNATRules(ifname, cidr))
+}
+
+// initSharedGatewayNATRules sets up iptables rules for interfaces
+func initSharedGatewayNATRules(cidr *net.IPNet) error {
+	return addIptRules(getSharedGatewayNATRules(cidr))
 }
 
 func addChaintoTable(ipt util.IPTablesHelper, tableName, chain string) {

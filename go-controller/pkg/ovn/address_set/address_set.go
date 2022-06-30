@@ -33,9 +33,12 @@ type AddressSetFactory interface {
 	// and contains the given IPs, or an error. Internally it creates
 	// an address set for IPv4 and IPv6 each.
 	NewAddressSet(name string, ips []net.IP) (AddressSet, error)
-	// EnsureAddressSet makes sure that an address set object exists in ovn
-	// with the given name
+	// EnsureAddressSet ensures the address_set with the given name exists.
+	// If it exists it returns the set and if it does not exist, creates
+	// an empty addressSet and returns it.
 	EnsureAddressSet(name string) (AddressSet, error)
+	// GetAddressSet returns the address-set that matches the given searchName
+	GetAddressSet(name string) (AddressSet, error)
 	// ProcessEachAddressSet calls the given function for each address set
 	// known to the factory
 	ProcessEachAddressSet(iteratorFn AddressSetIterFunc) error
@@ -133,6 +136,39 @@ func (asf *ovnAddressSetFactory) EnsureAddressSet(name string) (AddressSet, erro
 	}
 
 	return &ovnAddressSets{nbClient: asf.nbClient, name: name, ipv4: v4set, ipv6: v6set}, nil
+}
+
+// GetAddressSet returns the address-set that matches the given searchName
+func (asf *ovnAddressSetFactory) GetAddressSet(searchName string) (AddressSet, error) {
+	var (
+		v4set, v6set *ovnAddressSet
+	)
+	p := func(addrSet *nbdb.AddressSet) bool {
+		findName, exists := addrSet.ExternalIDs["name"]
+		return exists && strings.Contains(findName, searchName)
+	}
+	addrSetList, err := libovsdbops.FindAddressSetsWithPredicate(asf.nbClient, p)
+	if err != nil {
+		return nil, fmt.Errorf("error fetching address sets: %+v", err)
+	}
+	getOVNAddressSet := func(addrSet *nbdb.AddressSet) *ovnAddressSet {
+		return &ovnAddressSet{
+			nbClient: asf.nbClient,
+			name:     addrSet.ExternalIDs["name"],
+			hashName: hashedAddressSet(addrSet.ExternalIDs["name"]),
+			uuid:     addrSet.UUID,
+		}
+	}
+	for i := range addrSetList {
+		addrSet := addrSetList[i]
+		if strings.Contains(addrSet.ExternalIDs["name"], ipv4AddressSetSuffix) {
+			v4set = getOVNAddressSet(addrSet)
+		}
+		if strings.Contains(addrSet.ExternalIDs["name"], ipv6AddressSetSuffix) {
+			v6set = getOVNAddressSet(addrSet)
+		}
+	}
+	return &ovnAddressSets{nbClient: asf.nbClient, name: searchName, ipv4: v4set, ipv6: v6set}, nil
 }
 
 func forEachAddressSet(nbClient libovsdbclient.Client, do func(string) error) error {

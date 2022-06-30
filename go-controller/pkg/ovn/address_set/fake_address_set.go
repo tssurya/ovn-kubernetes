@@ -71,6 +71,26 @@ func (f *FakeAddressSetFactory) EnsureAddressSet(name string) (AddressSet, error
 	return set, nil
 }
 
+// GetAddressSet returns set object
+func (f *FakeAddressSetFactory) GetAddressSet(name string) (AddressSet, error) {
+	f.Lock()
+	defer f.Unlock()
+	_, ok := f.sets[name]
+	gomega.Expect(ok).To(gomega.BeFalse())
+	set, err := newFakeAddressSets(name, []net.IP{}, f.removeAddressSet)
+	if err != nil {
+		return nil, err
+	}
+	ip4ASName, ip6ASName := MakeAddressSetName(name)
+	if set.ipv4 != nil {
+		f.sets[ip4ASName] = set.ipv4
+	}
+	if set.ipv6 != nil {
+		f.sets[ip6ASName] = set.ipv6
+	}
+	return set, nil
+}
+
 func (f *FakeAddressSetFactory) ProcessEachAddressSet(iteratorFn AddressSetIterFunc) error {
 	f.Lock()
 	defer f.Unlock()

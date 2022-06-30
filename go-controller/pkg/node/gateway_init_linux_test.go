@@ -260,6 +260,9 @@ func shareGatewayInterfaceTest(app *cli.App, testNS ns.NetNS,
 				"OVN-KUBE-SNAT-MGMTPORT": []string{},
 				"OVN-KUBE-ETP":           []string{},
 				"OVN-KUBE-ITP":           []string{},
+				"POSTROUTING": []string{
+					"-s 10.1.1.0/24 -j MASQUERADE",
+				},
 			},
 			"filter": {},
 			"mangle": {

@@ -64,7 +64,7 @@ const (
 	InterNodePolicyPriority               = "1003"
 	HybridOverlaySubnetPriority           = 1002
 	HybridOverlayReroutePriority          = 501
-	DefaultNoRereoutePriority             = 101
+	EgressIPDefaultRoutePriority          = 101
 	EgressIPReroutePriority               = 100
 
 	V6NodeLocalNATSubnet           = "fd99::/64"
@@ -108,6 +108,8 @@ const (
 	// OVN-K8S Address Sets Names
 	HybridRoutePolicyPrefix = "hybrid-route-pods-"
 	EgressQoSRulePrefix     = "egress-qos-pods-"
+	ClusterNodeIP           = "cluster-node-ips"
+	EgressIPServedPods      = "egressip-served-pods"
 
 	// OVN-K8S Topology Versions
 	OvnSingleJoinSwitchTopoVersion = 1
