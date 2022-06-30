@@ -6,6 +6,7 @@ import (
 	"math/big"
 	"net"
 	"os"
+	"reflect"
 	"strconv"
 	"sync"
 	"time"
@@ -54,6 +55,7 @@ type ClusterManager struct {
 	// FIXME DUAL-STACK -  Make IP Allocators more dual-stack friendly
 	clusterSubnetAllocator       *subnetallocator.HostSubnetAllocator
 	hybridOverlaySubnetAllocator *subnetallocator.HostSubnetAllocator
+	zoneJoinSubnetAllocator      *subnetallocator.BaseSubnetAllocator
 
 	// event recorder used to post events to k8s
 	recorder record.EventRecorder
@@ -64,6 +66,9 @@ type ClusterManager struct {
 	nodeIdBitmap    *bitmapallocator.AllocationBitmap
 	nodeIdCache     map[string]int
 	nodeIdCacheLock sync.Mutex
+
+	zoneJoinubnetCache map[string]([]*net.IPNet)
+	zoneIdCacheLock    sync.Mutex
 
 	transitSwitchv4Cidr   *net.IPNet
 	transitSwitchBasev4Ip *big.Int
@@ -101,9 +106,11 @@ func NewClusterManager(ovnClient *util.OVNClientset, wf *factory.WatchFactory, s
 		wg:                           wg,
 		clusterSubnetAllocator:       subnetallocator.NewHostSubnetAllocator(),
 		hybridOverlaySubnetAllocator: hybridOverlaySubnetAllocator,
+		zoneJoinSubnetAllocator:      &subnetallocator.BaseSubnetAllocator{},
 		recorder:                     recorder,
 		nodeIdBitmap:                 nodeIdBitmap,
 		nodeIdCache:                  make(map[string]int),
+		zoneJoinubnetCache:           make(map[string]([]*net.IPNet)),
 		transitSwitchBasev4Ip:        utilnet.BigForIP(tsv4Cidr.IP),
 		transitSwitchv4Cidr:          tsv4Cidr,
 		transitSwitchBasev6Ip:        utilnet.BigForIP(tsv6Cidr.IP),
@@ -247,6 +254,11 @@ func (cm *ClusterManager) StartClusterManager() error {
 		}
 	}
 
+	if err := cm.InitZoneSubnetAllocatorRanges(config.ClusterManager.ZoneJoinSubnets); err != nil {
+		klog.Errorf("Failed to initialize zone join subnet allocator ranges: %v", err)
+		return err
+	}
+
 	return nil
 }
 
@@ -256,6 +268,16 @@ func (cm *ClusterManager) InitSubnetAllocatorRanges(subnets []config.CIDRNetwork
 
 func (cm *ClusterManager) InitHybridOverlaySubnetAllocatorRanges(subnets []config.CIDRNetworkEntry) error {
 	return cm.hybridOverlaySubnetAllocator.InitRanges(subnets)
+}
+
+func (cm *ClusterManager) InitZoneSubnetAllocatorRanges(subnets []config.CIDRNetworkEntry) error {
+	for _, entry := range subnets {
+		if err := cm.zoneJoinSubnetAllocator.AddNetworkRange(entry.CIDR, entry.HostSubnetLength); err != nil {
+			return err
+		}
+		klog.V(5).Infof("Added network range %s to zone subnet allocator", entry.CIDR)
+	}
+	return nil
 }
 
 // Run starts the actual watching.
@@ -306,6 +328,19 @@ func (cm *ClusterManager) syncNodes(nodes []interface{}) error {
 		if err := cm.clusterSubnetAllocator.MarkSubnetsAllocated(node.Name, hostSubnets...); err != nil {
 			utilruntime.HandleError(err)
 		}
+
+		nodeZone := util.GetNodeZone(node)
+		zoneSubnets, err := util.ParseZoneJoinSubnetsAnnotation(node, types.DefaultNetworkName)
+		if err != nil {
+			klog.Warning(err.Error())
+		} else if zoneSubnets != nil {
+			_, found := cm.zoneJoinubnetCache[nodeZone]
+			if !found {
+				cm.zoneJoinubnetCache[nodeZone] = zoneSubnets
+				_ = cm.zoneJoinSubnetAllocator.MarkAllocatedNetworks(types.DefaultNetworkName, zoneSubnets...)
+			}
+		}
+
 	}
 	return nil
 }
@@ -335,6 +370,7 @@ func (cm *ClusterManager) addUpdateNodeEvent(node *kapi.Node) error {
 func (cm *ClusterManager) updateNodeAnnotationWithRetry(
 	nodeName string, hostSubnets []*net.IPNet,
 	nodeTransitSwitchPortIps []*net.IPNet,
+	zoneJoinSubnets []*net.IPNet,
 	nodeId int) error {
 	// Retry if it fails because of potential conflict which is transient. Return error in the
 	// case of other errors (say temporary API server down), and it will be taken care of by the
@@ -364,7 +400,18 @@ func (cm *ClusterManager) updateNodeAnnotationWithRetry(
 					node.Name, util.JoinIPNets(nodeTransitSwitchPortIps, ","))
 			}
 		}
-		return cm.kube.PatchNode(node, cnode)
+
+		cnode.Annotations, err = util.UpdateZoneJoinSubnetsAnnotation(cnode.Annotations, zoneJoinSubnets, types.DefaultNetworkName)
+		if err != nil {
+			return fmt.Errorf("failed to update node %q annotation subnet %s",
+				node.Name, util.JoinIPNets(zoneJoinSubnets, ","))
+		}
+
+		if !reflect.DeepEqual(cnode.Annotations, node.Annotations) {
+			return cm.kube.PatchNode(node, cnode)
+		}
+
+		return nil
 	})
 	if resultErr != nil {
 		return fmt.Errorf("failed to update node %s annotation", nodeName)
@@ -403,7 +450,12 @@ func (cm *ClusterManager) addNode(node *kapi.Node) error {
 	// Generate v4 and v6 transit switch port IPs for the node.
 	nodeTransitSwitchPortIps := cm.syncNodeTransitSwitchPortIps(node, allocatedNodeId)
 
-	return cm.updateNodeAnnotationWithRetry(node.Name, hostSubnets, nodeTransitSwitchPortIps, allocatedNodeId)
+	zoneJoinSubnets, err := cm.allocateZoneJoinSubnets(node)
+	if err != nil {
+		return err
+	}
+
+	return cm.updateNodeAnnotationWithRetry(node.Name, hostSubnets, nodeTransitSwitchPortIps, zoneJoinSubnets, allocatedNodeId)
 }
 
 func (cm *ClusterManager) deleteNode(node *kapi.Node) error {
@@ -466,7 +518,46 @@ func shouldUpdateNode(node, oldNode *kapi.Node) (bool, error) {
 		return false, fmt.Errorf("error updating node %s, cannot assign a hostsubnet to already created node, please delete node and recreate", node.Name)
 	}
 
-	return true, nil
+	if !reflect.DeepEqual(oldNode.Annotations, node.Annotations) {
+		return true, nil
+	}
+
+	return false, nil
+}
+
+func (cm *ClusterManager) allocateZoneJoinSubnets(node *kapi.Node) ([]*net.IPNet, error) {
+	cm.zoneIdCacheLock.Lock()
+	defer func() {
+		cm.zoneIdCacheLock.Unlock()
+	}()
+
+	nodeZone := util.GetNodeZone(node)
+	allocatedZoneSubnets, found := cm.zoneJoinubnetCache[nodeZone]
+	if found {
+		return allocatedZoneSubnets, nil
+	}
+
+	allocatedSubnets := []*net.IPNet{}
+	if config.IPv4Mode {
+		allocatedSubnet, err := cm.zoneJoinSubnetAllocator.AllocateIPv4Network(types.DefaultNetworkName)
+		if err != nil {
+			return nil, fmt.Errorf("error allocating join IPv4 network for zone %s: %v", nodeZone, err)
+		}
+
+		allocatedSubnets = append(allocatedSubnets, allocatedSubnet)
+	}
+
+	if config.IPv6Mode {
+		allocatedSubnet, err := cm.zoneJoinSubnetAllocator.AllocateIPv6Network(types.DefaultNetworkName)
+		if err != nil {
+			return nil, fmt.Errorf("error allocating join IPv6 network for zone %s: %v", nodeZone, err)
+		}
+
+		allocatedSubnets = append(allocatedSubnets, allocatedSubnet)
+	}
+
+	cm.zoneJoinubnetCache[nodeZone] = allocatedSubnets
+	return allocatedSubnets, nil
 }
 
 func (cm *ClusterManager) removeNodeId(nodeName string, nodeId int) {
