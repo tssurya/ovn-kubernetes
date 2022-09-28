@@ -229,6 +229,7 @@ ovn_ipfix_targets=${OVN_IPFIX_TARGETS:-}
 ovn_ipfix_sampling=${OVN_IPFIX_SAMPLING:-} \
 ovn_ipfix_cache_max_flows=${OVN_IPFIX_CACHE_MAX_FLOWS:-} \
 ovn_ipfix_cache_active_timeout=${OVN_IPFIX_CACHE_ACTIVE_TIMEOUT:-} \
+ovn_interconnect_enable=${OVN_INTERCONNECT_ENABLE:-false}
 
 # OVNKUBE_NODE_MODE - is the mode which ovnkube node operates
 ovnkube_node_mode=${OVNKUBE_NODE_MODE:-"full"}
@@ -323,9 +324,11 @@ wait_for_event() {
 # The ovnkube-db kubernetes service must be populated with OVN DB service endpoints
 # before various OVN K8s containers can come up. This functions checks for that.
 ready_to_start_node() {
+  ovn_zone=$(get_node_zone)
+  echo "Getting the ovnkube-db-${ovn_zone} ep"
   # See if ep is available ...
   IFS=" " read -a ovn_db_hosts <<<"$(kubectl --server=${K8S_APISERVER} --token=${k8s_token} --certificate-authority=${K8S_CACERT} \
-    get ep -n ${ovn_kubernetes_namespace} ovnkube-db -o=jsonpath='{range .subsets[0].addresses[*]}{.ip}{" "}')"
+    get ep -n ${ovn_kubernetes_namespace} ovnkube-db-${ovn_zone} -o=jsonpath='{range .subsets[0].addresses[*]}{.ip}{" "}')"
   if [[ ${#ovn_db_hosts[@]} == 0 ]]; then
     return 1
   fi
@@ -665,13 +668,14 @@ cleanup-ovs-server() {
 set_ovnkube_db_ep() {
   ips=("$@")
 
-  echo "=============== setting ovnkube-db endpoints to ${ips[@]}"
+  ovn_zone=$(get_node_zone)
+  echo "=============== setting ovnkube-db-${ovn_zone} endpoints to ${ips[@]}"
   # create a new endpoint for the headless onvkube-db service without selectors
   kubectl --server=${K8S_APISERVER} --token=${k8s_token} --certificate-authority=${K8S_CACERT} apply -f - <<EOF
 apiVersion: v1
 kind: Endpoints
 metadata:
-  name: ovnkube-db
+  name: ovnkube-db-${ovn_zone}
   namespace: ${ovn_kubernetes_namespace}
 subsets:
   - addresses:
@@ -703,11 +707,24 @@ function memory_trim_on_compaction_supported {
   fi
 }
 
+function get_node_zone() {
+  zone=$(kubectl --server=${K8S_APISERVER} --token=${k8s_token} --certificate-authority=${K8S_CACERT} \
+     get node ${K8S_NODE} -o=jsonpath={'.metadata.labels.k8s\.ovn\.org/ovn-zone'})
+  if [ "$zone" == "" ]; then
+      echo "global"
+  else
+      echo $zone
+  fi
+}
+
 # v3 - run nb_ovsdb in a separate container
 nb-ovsdb() {
   trap 'ovsdb_cleanup nb' TERM
   check_ovn_daemonset_version "3"
   rm -f ${OVN_RUNDIR}/ovnnb_db.pid
+
+  ovn_zone=$(get_node_zone)
+  echo "Node ${K8S_NODE} zone is $ovn_zone"
 
   if [[ ${ovn_db_host} == "" ]]; then
     echo "The IP address of the host $(hostname) could not be determined. Exiting..."
@@ -732,6 +749,10 @@ nb-ovsdb() {
     ovn-nbctl set nb_global . ipsec=true
     echo "=============== nb-ovsdb ========== reconfigured for ipsec"
   }
+
+  ovn-nbctl set NB_Global . name=${ovn_zone}
+  ovn-nbctl set NB_Global . options:name=${ovn_zone}
+
   ovn-nbctl --inactivity-probe=0 set-connection p${transport}:${ovn_nb_port}:$(bracketify ${ovn_db_host})
   if memory_trim_on_compaction_supported "nbdb"
   then
@@ -993,6 +1014,12 @@ ovn-master() {
   fi
   echo "ovnkube_config_duration_enable_flag: ${ovnkube_config_duration_enable_flag}"
 
+  ovnkube_enable_interconnect_flag=
+  if [[ ${ovn_interconnect_enable} == "true" ]]; then
+    ovnkube_enable_interconnect_flag="--enable-interconnect"
+  fi
+  echo "ovnkube_enable_interconnect_flag: ${ovnkube_enable_interconnect_flag}"
+
   echo "=============== ovn-master ========== MASTER ONLY"
   /usr/bin/ovnkube \
     --init-master ${K8S_NODE} \
@@ -1020,6 +1047,7 @@ ovn-master() {
     ${egressqos_enabled_flag} \
     ${ovnkube_config_duration_enable_flag} \
     ${multi_network_enabled_flag} \
+    ${ovnkube_enable_interconnect_flag} \
     --metrics-bind-address ${ovnkube_master_metrics_bind_address} \
     --host-network-namespace ${ovn_host_network_namespace} &
 
@@ -1332,6 +1360,12 @@ ovn-node() {
       "
   fi
 
+  ovnkube_enable_interconnect_flag=
+  if [[ ${ovn_interconnect_enable} == "true" ]]; then
+    ovnkube_enable_interconnect_flag="--enable-interconnect"
+  fi
+  echo "ovnkube_enable_interconnect_flag: ${ovnkube_enable_interconnect_flag}"
+
   echo "=============== ovn-node   --init-node"
   /usr/bin/ovnkube --init-node ${K8S_NODE} \
     --cluster-subnets ${net_cidr} --k8s-service-cidr=${svc_cidr} \
@@ -1374,6 +1408,7 @@ ovn-node() {
      ${ovnkube_node_mode_flag} \
     ${egress_interface} \
     --host-network-namespace ${ovn_host_network_namespace} \
+    ${ovnkube_enable_interconnect_flag} \
      ${ovnkube_node_mgmt_port_netdev_flag} &
 
   wait_for_event attempts=3 process_ready ovnkube
