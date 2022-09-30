@@ -1,0 +1,61 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Debug OVN Cluster Tests test function",
+            "type": "go",
+            "request": "launch",
+            "mode": "test",
+            // "program": "./pkg/metrics",
+            // "program": "./pkg/node",
+            "program": "./pkg/ovn",
+            // "program": "./pkg/ovn/address_set",
+            // "program": "./pkg/libovsdbops",
+            "buildFlags": "-mod=vendor",
+            "args": [
+                "-test.run",
+                // ?
+                // "TestDeleteChassis",
+                // OVN / METRICS
+                "TestClusterNode",
+                // Node Pkg
+                // "TestNodeSuite",
+                // ADDRESS SET PKG
+                // "TestAddressSet",
+                "-ginkgo.focus",
+                // Node PKG
+                // "Node"
+                // METRICS PKG
+                // "Config duration recorder operations",
+                // "should record a result for kind metric",
+                // Address Set PKG
+                // "calls the iterator function for each address set with the given prefix",
+                // "re-uses an existing address set and replaces IPs",
+                // OVN pkg
+                // "OVN master EgressIP Operations",
+                // "should re-assign EgressIPs and perform proper OVN transactions when pod is created after node egress label switch",
+                //"correctly remove a LSP from a pod that has stale nodeName annotation",
+                "creates an address set for existing nodes when the host network traffic namespace is created",
+                // "egressIP pod recreate with same name",
+                // "should probe nodes using grpc",
+                // "should re-assign EgressIPs and perform proper OVN transactions when pod is created after node egress label switch",
+                // "correctly stops retrying deleting a pod after failing n times",
+                // "egressIP pod recreate with same name",
+                // "correctly does not retry while deleting a pod that has no annotations",
+                // "remove a LSP from a pod that has no OVN annotations",
+                // "Gateway Init Operations",
+                // "using EgressNode retry should re-assign EgressIPs and perform proper OVN transactions when pod is created after node",
+                // "creates an address set for existing nodes when the host network traffic namespace is created",
+                // "Egress Gateway Operations SNAT on gateway router operations",
+                // "reconciles an existing gress networkPolicy with a pod selector in its own namespace"
+                // "should remove stale EgressIP setup when pod is deleted while ovnkube-master is not running"
+                // "Test delete non-existing item by model predicate specification",
+                // "reconciles an ingress networkPolicy updating an existing ACL",
+            ],
+
+        },
+    ]
+}
