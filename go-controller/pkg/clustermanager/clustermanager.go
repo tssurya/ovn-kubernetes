@@ -62,6 +62,14 @@ type ClusterManager struct {
 
 	// retry framework for nodes
 	retryNodes *objretry.RetryFramework
+	// retry framework for Egress nodes
+	retryEgressNodes *objretry.RetryFramework
+	// retry framework for egress IP
+	retryEgressIPs *objretry.RetryFramework
+	// retry framework for Cloud private IP config
+	retryCloudPrivateIPConfig *objretry.RetryFramework
+	// Controller used for programming OVN for egress IP
+	eIPC egressIPController
 
 	nodeIdBitmap    *bitmapallocator.AllocationBitmap
 	nodeIdCache     map[string]int
@@ -115,6 +123,18 @@ func NewClusterManager(ovnClient *util.OVNClientset, wf *factory.WatchFactory, s
 		transitSwitchv4Cidr:          tsv4Cidr,
 		transitSwitchBasev6Ip:        utilnet.BigForIP(tsv6Cidr.IP),
 		transitSwitchv6Cidr:          tsv4Cidr,
+		eIPC: egressIPController{
+			egressIPAssignmentMutex:           &sync.Mutex{},
+			podAssignmentMutex:                &sync.Mutex{},
+			podAssignment:                     make(map[string]*podAssignmentState),
+			pendingCloudPrivateIPConfigsMutex: &sync.Mutex{},
+			pendingCloudPrivateIPConfigsOps:   make(map[string]map[string]*cloudPrivateIPConfigOp),
+			allocator:                         allocator{&sync.Mutex{}, make(map[string]*egressNode)},
+			watchFactory:                      wf,
+			egressIPTotalTimeout:              config.OVNKubernetesFeature.EgressIPReachabiltyTotalTimeout,
+			reachabilityCheckInterval:         egressIPReachabilityCheckInterval,
+			egressIPNodeHealthCheckPort:       config.OVNKubernetesFeature.EgressIPNodeHealthCheckPort,
+		},
 	}
 
 	cm.initRetryFramework()
@@ -140,6 +160,9 @@ func (_ ovnkubeClusterManagerLeaderMetricsProvider) NewLeaderMetric() leaderelec
 
 func (cm *ClusterManager) initRetryFramework() {
 	cm.retryNodes = cm.newRetryFramework(factory.NodeType)
+	cm.retryEgressNodes = cm.newRetryFramework(factory.EgressNodeType)
+	cm.retryEgressIPs = cm.newRetryFramework(factory.EgressIPType)
+	cm.retryCloudPrivateIPConfig = cm.newRetryFramework(factory.CloudPrivateIPConfigType)
 }
 
 // Start waits until this process is the leader before starting master functions
@@ -254,6 +277,28 @@ func (cm *ClusterManager) StartClusterManager() error {
 		}
 	}
 
+	klog.Infof("%v", config.OVNKubernetesFeature.EnableEgressIP)
+	if config.OVNKubernetesFeature.EnableEgressIP {
+		klog.Infof("SURYA")
+		if err := cm.WatchEgressNodes(); err != nil {
+			return err
+		}
+		if err := cm.WatchEgressIP(); err != nil {
+			return err
+		}
+		/*if util.PlatformTypeIsEgressIPCloudProvider() {
+			if err := cm.WatchCloudPrivateIPConfig(); err != nil {
+				return err
+			}
+		}*/
+		if config.OVNKubernetesFeature.EgressIPReachabiltyTotalTimeout == 0 {
+			klog.V(2).Infof("EgressIP node reachability check disabled")
+		} else if config.OVNKubernetesFeature.EgressIPNodeHealthCheckPort != 0 {
+			klog.Infof("EgressIP node reachability enabled and using gRPC port %d",
+				config.OVNKubernetesFeature.EgressIPNodeHealthCheckPort)
+		}
+	}
+
 	if err := cm.InitZoneSubnetAllocatorRanges(config.ClusterManager.ZoneJoinSubnets); err != nil {
 		klog.Errorf("Failed to initialize zone join subnet allocator ranges: %v", err)
 		return err
@@ -299,6 +344,11 @@ func (cm *ClusterManager) Run(nodeName string) error {
 func (cm *ClusterManager) WatchNodes() error {
 	_, err := cm.retryNodes.WatchResource()
 	return err
+}
+
+func (cm *ClusterManager) initClusterEgressPolicies(nodes []interface{}) error {
+	go cm.checkEgressNodesReachability()
+	return nil
 }
 
 func (cm *ClusterManager) syncNodes(nodes []interface{}) error {
@@ -676,4 +726,26 @@ func (cm *ClusterManager) syncNodeTransitSwitchPortIps(node *kapi.Node, nodeId i
 	} else {
 		return nil
 	}
+}
+
+// WatchEgressNodes starts the watching of egress assignable nodes and calls
+// back the appropriate handler logic.
+func (cm *ClusterManager) WatchEgressNodes() error {
+	_, err := cm.retryEgressNodes.WatchResource()
+	return err
+}
+
+// WatchCloudPrivateIPConfig starts the watching of cloudprivateipconfigs
+// resource and calls back the appropriate handler logic.
+func (cm *ClusterManager) WatchCloudPrivateIPConfig() error {
+	_, err := cm.retryCloudPrivateIPConfig.WatchResource()
+	return err
+}
+
+// WatchEgressIP starts the watching of egressip resource and calls back the
+// appropriate handler logic. It also initiates the other dedicated resource
+// handlers for egress IP setup: namespaces, pods.
+func (cm *ClusterManager) WatchEgressIP() error {
+	_, err := cm.retryEgressIPs.WatchResource()
+	return err
 }

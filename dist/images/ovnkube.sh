@@ -1370,6 +1370,17 @@ ovn-cluster-manager() {
       hybrid_overlay_flags="${hybrid_overlay_flags} --hybrid-overlay-cluster-subnets=${ovn_hybrid_overlay_net_cidr}"
     fi
   fi
+
+  egressip_enabled_flag=
+  if [[ ${ovn_egressip_enable} == "true" ]]; then
+      egressip_enabled_flag="--enable-egress-ip"
+  fi
+
+  egressip_healthcheck_port_flag=
+  if [[ -n "${ovn_egress_ip_healthcheck_port}" ]]; then
+      egressip_healthcheck_port_flag="--egressip-node-healthcheck-port=${ovn_egress_ip_healthcheck_port}"
+  fi
+
   ovn_v4_join_subnet_opt=
   if [[ -n ${ovn_v4_join_subnet} ]]; then
       ovn_v4_join_subnet_opt="--gateway-v4-join-subnet=${ovn_v4_join_subnet}"
@@ -1399,6 +1410,7 @@ ovn-cluster-manager() {
     ovnkube_config_duration_enable_flag="--metrics-enable-config-duration"
   fi
   echo "ovnkube_config_duration_enable_flag: ${ovnkube_config_duration_enable_flag}"
+  echo "${egressip_healthcheck_port_flag}: ${egressip_enabled_flag}"
 
   echo "=============== ovn-cluster-manager ========== MASTER ONLY"
   /usr/bin/ovnkube \
@@ -1415,6 +1427,8 @@ ovn-cluster-manager() {
     --logfile /var/log/ovn-kubernetes/ovnkube-cluster-manager.log \
     ${ovnkube_metrics_tls_opts} \
     ${multicast_enabled_flag} \
+    ${egressip_enabled_flag} \
+    ${egressip_healthcheck_port_flag} \
     ${ovnkube_config_duration_enable_flag} \
     --metrics-bind-address ${ovnkube_cluster_manager_metrics_bind_address} \
     --host-network-namespace ${ovn_host_network_namespace} &

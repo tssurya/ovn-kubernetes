@@ -35,12 +35,23 @@ type EgressIPStatus struct {
 	Items []EgressIPStatusItem `json:"items"`
 }
 
+type AssignmentStatus struct {
+	// Assigned node name
+	Node string `json:"node"`
+	// Assigned node name
+	Configured bool `json:"configured"`
+}
+
 // The per node status, for those egress IPs who have been assigned.
 type EgressIPStatusItem struct {
+	// Node chosen by the global controller
+	ChosenNode string `json:"chosenNode"`
 	// Assigned node name
 	Node string `json:"node"`
 	// Assigned egress IP
 	EgressIP string `json:"egressIP"`
+	// new field proposed for IC
+	AssignmentState []AssignmentStatus `json:"assignmentState"`
 }
 
 // EgressIPSpec is a desired state description of EgressIP.

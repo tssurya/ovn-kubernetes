@@ -194,6 +194,8 @@ func newDefaultNetworkControllerCommon(cnci *CommonNetworkControllerInfo,
 			egressIPTotalTimeout:              config.OVNKubernetesFeature.EgressIPReachabiltyTotalTimeout,
 			reachabilityCheckInterval:         egressIPReachabilityCheckInterval,
 			egressIPNodeHealthCheckPort:       config.OVNKubernetesFeature.EgressIPNodeHealthCheckPort,
+			interconnectSupport:               config.EnableInterconnect,
+			localZoneNodes:                    make(map[string]bool),
 		},
 		loadbalancerClusterCache: make(map[kapi.Protocol]string),
 		loadBalancerGroupUUID:    "",
@@ -388,6 +390,7 @@ func (oc *DefaultNetworkController) Run(ctx context.Context) error {
 	}
 
 	if config.OVNKubernetesFeature.EnableEgressIP {
+		klog.Infof("SURYA")
 		// This is probably the best starting order for all egress IP handlers.
 		// WatchEgressIPNamespaces and WatchEgressIPPods only use the informer
 		// cache to retrieve the egress IPs when determining if namespace/pods
@@ -700,6 +703,9 @@ func (h *defaultNetworkControllerEventHandler) AddResource(obj interface{}, from
 
 	case factory.EgressIPType:
 		eIP := obj.(*egressipv1.EgressIP)
+		if h.oc.interconnectSupport {
+			return h.oc.reconcileLocalEgressIP(nil, eIP)
+		}
 		return h.oc.reconcileEgressIP(nil, eIP)
 
 	case factory.EgressIPNamespaceType:
@@ -712,23 +718,31 @@ func (h *defaultNetworkControllerEventHandler) AddResource(obj interface{}, from
 
 	case factory.EgressNodeType:
 		node := obj.(*kapi.Node)
-		if err := h.oc.setupNodeForEgress(node); err != nil {
+		if err := h.oc.setupNodeForEgress(node); err != nil { //local-master
 			return err
 		}
 		nodeEgressLabel := util.GetNodeEgressLabel()
 		nodeLabels := node.GetLabels()
 		_, hasEgressLabel := nodeLabels[nodeEgressLabel]
-		if hasEgressLabel {
-			h.oc.setNodeEgressAssignable(node.Name, true)
-		}
 		isReady := h.oc.isEgressNodeReady(node)
-		if isReady {
-			h.oc.setNodeEgressReady(node.Name, true)
-		}
 		isReachable := h.oc.isEgressNodeReachable(node)
-		if hasEgressLabel && isReachable && isReady {
-			h.oc.setNodeEgressReachable(node.Name, true)
-			if err := h.oc.addEgressNode(node.Name); err != nil {
+		// global-master
+		if ! h.oc.interconnectSupport {
+			if hasEgressLabel {
+				h.oc.setNodeEgressAssignable(node.Name, true)
+			}
+			if isReady {
+				h.oc.setNodeEgressReady(node.Name, true)
+			}
+			if hasEgressLabel && isReachable && isReady {
+				h.oc.setNodeEgressReachable(node.Name, true)
+				if err := h.oc.addEgressNode(node.Name); err != nil {
+					return err
+				}
+			}
+		} else if h.oc.isLocalZoneNode(node) && hasEgressLabel && isReachable && isReady {
+			//interconnect add logic
+			if err := h.oc.addLocalEgressNode(node.Name); err != nil {
 				return err
 			}
 		}
@@ -807,6 +821,9 @@ func (h *defaultNetworkControllerEventHandler) UpdateResource(oldObj, newObj int
 	case factory.EgressIPType:
 		oldEIP := oldObj.(*egressipv1.EgressIP)
 		newEIP := newObj.(*egressipv1.EgressIP)
+		if h.oc.interconnectSupport {
+			return h.oc.reconcileLocalEgressIP(oldEIP, newEIP)
+		}
 		return h.oc.reconcileEgressIP(oldEIP, newEIP)
 
 	case factory.EgressIPNamespaceType:
@@ -827,55 +844,83 @@ func (h *defaultNetworkControllerEventHandler) UpdateResource(oldObj, newObj int
 		// annotate the node with the egressIPConfig, but that might have
 		// happened after we processed the ADD for that object, hence keep
 		// retrying for all UPDATEs.
-		if err := h.oc.initEgressIPAllocator(newNode); err != nil {
-			klog.Warningf("Egress node initialization error: %v", err)
-		}
 		nodeEgressLabel := util.GetNodeEgressLabel()
 		oldLabels := oldNode.GetLabels()
 		newLabels := newNode.GetLabels()
 		_, oldHadEgressLabel := oldLabels[nodeEgressLabel]
 		_, newHasEgressLabel := newLabels[nodeEgressLabel]
-		// If the node is not labeled for egress assignment, just return
-		// directly, we don't really need to set the ready / reachable
-		// status on this node if the user doesn't care about using it.
-		if !oldHadEgressLabel && !newHasEgressLabel {
-			return nil
-		}
-		h.oc.setNodeEgressAssignable(newNode.Name, newHasEgressLabel)
-		if oldHadEgressLabel && !newHasEgressLabel {
-			klog.Infof("Node: %s has been un-labeled, deleting it from egress assignment", newNode.Name)
-			return h.oc.deleteEgressNode(oldNode.Name)
-		}
 		isOldReady := h.oc.isEgressNodeReady(oldNode)
 		isNewReady := h.oc.isEgressNodeReady(newNode)
 		isNewReachable := h.oc.isEgressNodeReachable(newNode)
-		h.oc.setNodeEgressReady(newNode.Name, isNewReady)
-		if !oldHadEgressLabel && newHasEgressLabel {
-			klog.Infof("Node: %s has been labeled, adding it for egress assignment", newNode.Name)
-			if isNewReady && isNewReachable {
+		if !h.oc.interconnectSupport {
+			if err := h.oc.initEgressIPAllocator(newNode); err != nil {
+				klog.Warningf("Egress node initialization error: %v", err)
+			}
+			// If the node is not labeled for egress assignment, just return
+			// directly, we don't really need to set the ready / reachable
+			// status on this node if the user doesn't care about using it.
+			if !oldHadEgressLabel && !newHasEgressLabel {
+				return nil
+			}
+			h.oc.setNodeEgressAssignable(newNode.Name, newHasEgressLabel)
+			if oldHadEgressLabel && !newHasEgressLabel {
+				klog.Infof("Node: %s has been un-labeled, deleting it from egress assignment", newNode.Name)
+				return h.oc.deleteEgressNode(oldNode.Name)
+			}
+			h.oc.setNodeEgressReady(newNode.Name, isNewReady)
+			if !oldHadEgressLabel && newHasEgressLabel {
+				klog.Infof("Node: %s has been labeled, adding it for egress assignment", newNode.Name)
+				if isNewReady && isNewReachable {
+					h.oc.setNodeEgressReachable(newNode.Name, isNewReachable)
+					if err := h.oc.addEgressNode(newNode.Name); err != nil {
+						return err
+					}
+				} else {
+					klog.Warningf("Node: %s has been labeled, but node is not ready"+
+						" and reachable, cannot use it for egress assignment", newNode.Name)
+				}
+				return nil
+			}
+			if isOldReady == isNewReady {
+				return nil
+			}
+			if !isNewReady {
+				klog.Warningf("Node: %s is not ready, deleting it from egress assignment", newNode.Name)
+				if err := h.oc.deleteEgressNode(newNode.Name); err != nil {
+					return err
+				}
+			} else if isNewReady && isNewReachable {
+				klog.Infof("Node: %s is ready and reachable, adding it for egress assignment", newNode.Name)
 				h.oc.setNodeEgressReachable(newNode.Name, isNewReachable)
 				if err := h.oc.addEgressNode(newNode.Name); err != nil {
 					return err
 				}
-			} else {
-				klog.Warningf("Node: %s has been labeled, but node is not ready"+
-					" and reachable, cannot use it for egress assignment", newNode.Name)
 			}
-			return nil
-		}
-		if isOldReady == isNewReady {
-			return nil
-		}
-		if !isNewReady {
-			klog.Warningf("Node: %s is not ready, deleting it from egress assignment", newNode.Name)
-			if err := h.oc.deleteEgressNode(newNode.Name); err != nil {
-				return err
+		} else if h.oc.isLocalZoneNode(newNode) {
+			if !oldHadEgressLabel && !newHasEgressLabel {
+				return nil
 			}
-		} else if isNewReady && isNewReachable {
-			klog.Infof("Node: %s is ready and reachable, adding it for egress assignment", newNode.Name)
-			h.oc.setNodeEgressReachable(newNode.Name, isNewReachable)
-			if err := h.oc.addEgressNode(newNode.Name); err != nil {
-				return err
+			if oldHadEgressLabel && !newHasEgressLabel {
+				return h.oc.deleteLocalEgressNode(oldNode.Name)
+			}
+			if !oldHadEgressLabel && newHasEgressLabel && isNewReady && isNewReachable {
+				if err := h.oc.addLocalEgressNode(newNode.Name); err != nil {
+					return err
+				}
+			}
+			if isOldReady == isNewReady {
+				return nil
+			}
+			if !isNewReady {
+				klog.Warningf("Node: %s is not ready, deleting it from egress assignment", newNode.Name)
+				if err := h.oc.deleteLocalEgressNode(newNode.Name); err != nil {
+					return err
+				}
+			} else if isNewReady && isNewReachable {
+				klog.Infof("Node: %s is ready and reachable, adding it for egress assignment", newNode.Name)
+				if err := h.oc.addLocalEgressNode(newNode.Name); err != nil {
+					return err
+				}
 			}
 		}
 		return nil
@@ -969,6 +1014,9 @@ func (h *defaultNetworkControllerEventHandler) DeleteResource(obj, cachedObj int
 
 	case factory.EgressIPType:
 		eIP := obj.(*egressipv1.EgressIP)
+		if h.oc.interconnectSupport {
+			return h.oc.reconcileLocalEgressIP(eIP, nil)
+		}
 		return h.oc.reconcileEgressIP(eIP, nil)
 
 	case factory.EgressIPNamespaceType:
@@ -986,8 +1034,15 @@ func (h *defaultNetworkControllerEventHandler) DeleteResource(obj, cachedObj int
 		}
 		nodeEgressLabel := util.GetNodeEgressLabel()
 		nodeLabels := node.GetLabels()
-		if _, hasEgressLabel := nodeLabels[nodeEgressLabel]; hasEgressLabel {
-			if err := h.oc.deleteEgressNode(node.Name); err != nil {
+		_, hasEgressLabel := nodeLabels[nodeEgressLabel]
+		if !h.oc.interconnectSupport {
+			if hasEgressLabel {
+				if err := h.oc.deleteEgressNode(node.Name); err != nil {
+					return err
+				}
+			}
+		} else if h.oc.isLocalZoneNode(node) && hasEgressLabel {
+			if err := h.oc.deleteLocalEgressNode(node.Name); err != nil {
 				return err
 			}
 		}

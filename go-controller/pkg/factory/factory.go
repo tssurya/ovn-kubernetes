@@ -374,14 +374,24 @@ func NewNodeWatchFactory(ovnClientset *util.OVNClientset, nodeName string) (*Wat
 func NewClusterManagerWatchFactory(ovnClientset *util.OVNClientset) (*WatchFactory, error) {
 	wf := &WatchFactory{
 		iFactory:  informerfactory.NewSharedInformerFactory(ovnClientset.KubeClient, resyncInterval),
+		eipFactory:       egressipinformerfactory.NewSharedInformerFactory(ovnClientset.EgressIPClient, resyncInterval),
 		informers: make(map[reflect.Type]*informer),
 		stopChan:  make(chan struct{}),
 	}
 
+	if err := egressipapi.AddToScheme(egressipscheme.Scheme); err != nil {
+		return nil, err
+	}
 	var err error
 	wf.informers[NodeType], err = newInformer(NodeType, wf.iFactory.Core().V1().Nodes().Informer())
 	if err != nil {
 		return nil, err
+	}
+	if config.OVNKubernetesFeature.EnableEgressIP {
+		wf.informers[EgressIPType], err = newInformer(EgressIPType, wf.eipFactory.K8s().V1().EgressIPs().Informer())
+		if err != nil {
+			return nil, err
+		}
 	}
 	return wf, nil
 }

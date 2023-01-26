@@ -4,9 +4,12 @@ import (
 	"fmt"
 	"reflect"
 
+	egressipv1 "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressip/v1"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/factory"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/retry"
+	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
 	kapi "k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	cache "k8s.io/client-go/tools/cache"
 	"k8s.io/klog/v2"
 )
@@ -41,7 +44,9 @@ func (cm *ClusterManager) newRetryFramework(objectType reflect.Type) *retry.Retr
 // object and then add the new one.
 func hasResourceAnUpdateFunc(objType reflect.Type) bool {
 	switch objType {
-	case factory.NodeType:
+	case factory.NodeType,
+		  factory.EgressNodeType,
+		  factory.EgressIPType:
 		return true
 	}
 	return false
@@ -92,6 +97,8 @@ func (h *cmEventHandler) GetResourceFromInformerCache(key string) (interface{}, 
 	case factory.NodeType,
 		factory.EgressNodeType:
 		obj, err = h.cm.watchFactory.GetNode(name)
+	case factory.EgressIPType:
+		obj, err = h.cm.watchFactory.GetEgressIP(name)
 
 	default:
 		err = fmt.Errorf("object type %s not supported, cannot retrieve it from informers cache",
@@ -147,6 +154,31 @@ func (h *cmEventHandler) AddResource(obj interface{}, fromRetryLoop bool) error 
 				node.Name, err)
 			return err
 		}
+	case factory.EgressNodeType:
+		node := obj.(*kapi.Node)
+		if err := h.cm.setupNodeForEgress(node); err != nil {
+			return err
+		}
+		nodeEgressLabel := util.GetNodeEgressLabel()
+		nodeLabels := node.GetLabels()
+		_, hasEgressLabel := nodeLabels[nodeEgressLabel]
+		if hasEgressLabel {
+			h.cm.setNodeEgressAssignable(node.Name, true)
+		}
+		isReady := h.cm.isEgressNodeReady(node)
+		if isReady {
+			h.cm.setNodeEgressReady(node.Name, true)
+		}
+		isReachable := h.cm.isEgressNodeReachable(node)
+		if hasEgressLabel && isReachable && isReady {
+			h.cm.setNodeEgressReachable(node.Name, true)
+			if err := h.cm.addEgressNode(node.Name); err != nil {
+				return err
+			}
+		}
+	case factory.EgressIPType:
+		eIP := obj.(*egressipv1.EgressIP)
+		return h.cm.reconcileEgressIP(nil, eIP)
 	default:
 		return fmt.Errorf("no add function for object type %s", h.objType)
 	}
@@ -170,6 +202,70 @@ func (h *cmEventHandler) UpdateResource(oldObj, newObj interface{}, inRetryCache
 				node.Name, err)
 			return err
 		}
+	case factory.EgressIPType:
+		oldEIP := oldObj.(*egressipv1.EgressIP)
+		newEIP := newObj.(*egressipv1.EgressIP)
+		return h.cm.reconcileEgressIP(oldEIP, newEIP)
+	case factory.EgressNodeType:
+		oldNode := oldObj.(*kapi.Node)
+		newNode := newObj.(*kapi.Node)
+		// Initialize the allocator on every update,
+		// ovnkube-node/cloud-network-config-controller will make sure to
+		// annotate the node with the egressIPConfig, but that might have
+		// happened after we processed the ADD for that object, hence keep
+		// retrying for all UPDATEs.
+		if err := h.cm.initEgressIPAllocator(newNode); err != nil {
+			klog.Warningf("Egress node initialization error: %v", err)
+		}
+		nodeEgressLabel := util.GetNodeEgressLabel()
+		oldLabels := oldNode.GetLabels()
+		newLabels := newNode.GetLabels()
+		_, oldHadEgressLabel := oldLabels[nodeEgressLabel]
+		_, newHasEgressLabel := newLabels[nodeEgressLabel]
+		// If the node is not labeled for egress assignment, just return
+		// directly, we don't really need to set the ready / reachable
+		// status on this node if the user doesn't care about using it.
+		if !oldHadEgressLabel && !newHasEgressLabel {
+			return nil
+		}
+		h.cm.setNodeEgressAssignable(newNode.Name, newHasEgressLabel)
+		if oldHadEgressLabel && !newHasEgressLabel {
+			klog.Infof("Node: %s has been un-labeled, deleting it from egress assignment", newNode.Name)
+			return h.cm.deleteEgressNode(oldNode.Name)
+		}
+		isOldReady := h.cm.isEgressNodeReady(oldNode)
+		isNewReady := h.cm.isEgressNodeReady(newNode)
+		isNewReachable := h.cm.isEgressNodeReachable(newNode)
+		h.cm.setNodeEgressReady(newNode.Name, isNewReady)
+		if !oldHadEgressLabel && newHasEgressLabel {
+			klog.Infof("Node: %s has been labeled, adding it for egress assignment", newNode.Name)
+			if isNewReady && isNewReachable {
+				h.cm.setNodeEgressReachable(newNode.Name, isNewReachable)
+				if err := h.cm.addEgressNode(newNode.Name); err != nil {
+					return err
+				}
+			} else {
+				klog.Warningf("Node: %s has been labeled, but node is not ready"+
+					" and reachable, cannot use it for egress assignment", newNode.Name)
+			}
+			return nil
+		}
+		if isOldReady == isNewReady {
+			return nil
+		}
+		if !isNewReady {
+			klog.Warningf("Node: %s is not ready, deleting it from egress assignment", newNode.Name)
+			if err := h.cm.deleteEgressNode(newNode.Name); err != nil {
+				return err
+			}
+		} else if isNewReady && isNewReachable {
+			klog.Infof("Node: %s is ready and reachable, adding it for egress assignment", newNode.Name)
+			h.cm.setNodeEgressReachable(newNode.Name, isNewReachable)
+			if err := h.cm.addEgressNode(newNode.Name); err != nil {
+				return err
+			}
+		}
+		return nil
 	default:
 		return fmt.Errorf("no update function for object type %s", h.objType)
 	}
@@ -187,7 +283,36 @@ func (h *cmEventHandler) DeleteResource(obj, cachedObj interface{}) error {
 			return fmt.Errorf("could not cast obj of type %T to *knet.Node", obj)
 		}
 		return h.cm.deleteNode(node)
+	case factory.EgressIPType:
+		eIP := obj.(*egressipv1.EgressIP)
+		return h.cm.reconcileEgressIP(eIP, nil)
+	case factory.EgressNodeType:
+		node := obj.(*kapi.Node)
+		if err := h.cm.deleteNodeForEgress(node); err != nil {
+			return err
+		}
+		nodeEgressLabel := util.GetNodeEgressLabel()
+		nodeLabels := node.GetLabels()
+		_, hasEgressLabel := nodeLabels[nodeEgressLabel]
+		if hasEgressLabel {
+			if err := h.cm.deleteEgressNode(node.Name); err != nil {
+				return err
+			}
+		}
+		return nil
 	}
+	return nil
+}
+
+// deleteNodeForEgress remove the default allow logical router policies for the
+// node and removes the node from the allocator cache.
+func (cm *ClusterManager) deleteNodeForEgress(node *v1.Node) error {
+	cm.eIPC.allocator.Lock()
+	if eNode, exists := cm.eIPC.allocator.cache[node.Name]; exists {
+		eNode.healthClient.Disconnect()
+	}
+	delete(cm.eIPC.allocator.cache, node.Name)
+	cm.eIPC.allocator.Unlock()	
 	return nil
 }
 
@@ -201,7 +326,10 @@ func (h *cmEventHandler) SyncFunc(objs []interface{}) error {
 		switch h.objType {
 		case factory.NodeType:
 			syncFunc = h.cm.syncNodes
-
+		case factory.EgressNodeType:
+			syncFunc = h.cm.initClusterEgressPolicies
+		case factory.EgressIPType:
+			syncFunc = nil
 		default:
 			return fmt.Errorf("no sync function for object type %s", h.objType)
 		}
