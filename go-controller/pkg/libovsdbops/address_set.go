@@ -195,6 +195,21 @@ func DeleteAddressSets(nbClient libovsdbclient.Client, addrSets ...*nbdb.Address
 	return m.Delete(opModels...)
 }
 
+// DeleteAddressSetsWithPredicateOps looks up address sets from the cache based on
+// a given predicate and returns the delete ops for them
+func DeleteAddressSetsWithPredicateOps(nbClient libovsdbclient.Client, ops []libovsdb.Operation, p addressSetPredicate) ([]libovsdb.Operation, error) {
+	deleted := []*nbdb.AddressSet{}
+	opModel := operationModel{
+		ModelPredicate: p,
+		ExistingResult: &deleted,
+		ErrNotFound:    false,
+		BulkOp:         true,
+	}
+
+	m := newModelClient(nbClient)
+	return m.DeleteOps(ops, opModel)
+}
+
 // DeleteAddressSetsWithPredicate looks up address sets from the cache based on
 // a given predicate and deletes them
 func DeleteAddressSetsWithPredicate(nbClient libovsdbclient.Client, p addressSetPredicate) error {

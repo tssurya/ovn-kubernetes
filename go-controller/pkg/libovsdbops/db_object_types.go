@@ -7,13 +7,14 @@ const (
 
 const (
 	// owner types
-	EgressFirewallDNSOwnerType ownerType = "EgressFirewallDNS"
-	EgressQoSOwnerType         ownerType = "EgressQoS"
-	NetworkPolicyOwnerType     ownerType = "NetworkPolicy"
-	NamespaceOwnerType         ownerType = "Namespace"
-	HybridNodeRouteOwnerType   ownerType = "HybridNodeRoute"
-	EgressIPOwnerType          ownerType = "EgressIP"
-	EgressServiceOwnerType     ownerType = "EgressService"
+	AdminNetworkPolicyOwnerType ownerType = "AdminNetworkPolicy"
+	EgressFirewallDNSOwnerType  ownerType = "EgressFirewallDNS"
+	EgressQoSOwnerType          ownerType = "EgressQoS"
+	NetworkPolicyOwnerType      ownerType = "NetworkPolicy"
+	NamespaceOwnerType          ownerType = "Namespace"
+	HybridNodeRouteOwnerType    ownerType = "HybridNodeRoute"
+	EgressIPOwnerType           ownerType = "EgressIP"
+	EgressServiceOwnerType      ownerType = "EgressService"
 
 	// owner extra IDs, make sure to define only 1 ExternalIDKey for every string value
 	PriorityKey           ExternalIDKey = "priority"
@@ -40,6 +41,14 @@ var AddressSetEgressQoS = newObjectIDsType(addressSet, EgressQoSOwnerType, []Ext
 	// namespace
 	ObjectNameKey,
 	// egress qos priority
+	PriorityKey,
+	AddressSetIPFamilyKey,
+})
+
+var AddressSetAdminNetworkPolicy = newObjectIDsType(addressSet, AdminNetworkPolicyOwnerType, []ExternalIDKey{
+	// namespace
+	ObjectNameKey,
+	// admin network policy rule's priority
 	PriorityKey,
 	AddressSetIPFamilyKey,
 })
