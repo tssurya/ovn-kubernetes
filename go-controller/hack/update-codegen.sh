@@ -38,10 +38,15 @@ if  ! ( command -v controller-gen > /dev/null ); then
 fi
 
 for crd in ${crds}; do
+  version="v1"
+  if [[ "$crd" == "networkpolicyapi" ]]; then
+    version="v1alpha1"
+    # TODO: ADD THE COPY COMMAND
+  fi 
   echo "Generating deepcopy funcs for $crd"
   deepcopy-gen \
     --go-header-file hack/boilerplate.go.txt \
-    --input-dirs github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/$crd/v1 \
+    --input-dirs github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/$crd/$version \
     -O zz_generated.deepcopy \
     --bounding-dirs github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd
 
