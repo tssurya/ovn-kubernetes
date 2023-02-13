@@ -17,6 +17,7 @@ import (
 
 	cloudprivateipconfiglister "github.com/openshift/client-go/cloudnetwork/listers/cloudnetwork/v1"
 	egressiplister "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressip/v1/apis/listers/egressip/v1"
+	anplister "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/networkpolicyapi/v1alpha1/apis/listers/networkpolicyapi/v1alpha1"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ktypes "k8s.io/apimachinery/pkg/types"
@@ -449,6 +450,10 @@ func newInformerLister(oType reflect.Type, sharedInformer cache.SharedIndexInfor
 		return netlisters.NewNetworkPolicyLister(sharedInformer.GetIndexer()), nil
 	case EgressFirewallType:
 		return egressfirewalllister.NewEgressFirewallLister(sharedInformer.GetIndexer()), nil
+	case AdminNetworkPolicyType:
+		return anplister.NewAdminNetworkPolicyLister(sharedInformer.GetIndexer()), nil
+	case BaselineAdminNetworkPolicyType:
+		return anplister.NewBaselineAdminNetworkPolicyLister(sharedInformer.GetIndexer()), nil
 	case EgressIPType:
 		return egressiplister.NewEgressIPLister(sharedInformer.GetIndexer()), nil
 	case CloudPrivateIPConfigType:

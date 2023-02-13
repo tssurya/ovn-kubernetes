@@ -15,6 +15,7 @@ import (
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/nbdb"
 	addressset "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/ovn/address_set"
+	anpcontroller "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/ovn/controller/admin_network_policy"
 	egresssvc "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/ovn/controller/egress_services"
 	svccontroller "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/ovn/controller/services"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/ovn/healthcheck"
@@ -472,4 +473,14 @@ func newEgressServiceController(client clientset.Interface, nbClient libovsdbcli
 		stopCh, svcFactory.Core().V1().Services(),
 		svcFactory.Discovery().V1().EndpointSlices(),
 		svcFactory.Core().V1().Nodes())
+}
+
+func (oc *DefaultNetworkController) newANPController(client clientset.Interface, nbClient libovsdbclient.Client, recorder record.EventRecorder) {
+	oc.anpController = anpcontroller.NewController(
+		client,
+		nbClient,
+		oc.watchFactory.ANPInformer(),
+		oc.watchFactory.BANPInformer(),
+		recorder,
+	)
 }

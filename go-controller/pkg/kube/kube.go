@@ -10,6 +10,7 @@ import (
 	egressfirewallclientset "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressfirewall/v1/apis/clientset/versioned"
 	egressipv1 "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressip/v1"
 	egressipclientset "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressip/v1/apis/clientset/versioned"
+	anpclientset "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/networkpolicyapi/v1alpha1/apis/clientset/versioned"
 	kapi "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -67,6 +68,7 @@ type Kube struct {
 // Implements InterfaceOVN
 type KubeOVN struct {
 	Kube
+	ANPClient            anpclientset.Interface
 	EIPClient            egressipclientset.Interface
 	EgressFirewallClient egressfirewallclientset.Interface
 	CloudNetworkClient   ocpcloudnetworkclientset.Interface

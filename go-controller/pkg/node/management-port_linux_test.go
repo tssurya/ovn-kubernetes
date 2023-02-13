@@ -22,6 +22,7 @@ import (
 
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
 	egressipv1fake "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressip/v1/apis/clientset/versioned/fake"
+	anpfake "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/networkpolicyapi/v1alpha1/apis/clientset/versioned/fake"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/kube"
 	ovntest "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/testing"
 	mocks "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/testing/mocks/github.com/vishvananda/netlink"
@@ -244,7 +245,7 @@ func testManagementPort(ctx *cli.Context, fexec *ovntest.FakeExec, testNS ns.Net
 	_, err = config.InitConfig(ctx, fexec, nil)
 	Expect(err).NotTo(HaveOccurred())
 
-	nodeAnnotator := kube.NewNodeAnnotator(&kube.KubeOVN{kube.Kube{fakeClient}, egressipv1fake.NewSimpleClientset(), &egressfirewallfake.Clientset{}, nil}, existingNode.Name)
+	nodeAnnotator := kube.NewNodeAnnotator(&kube.KubeOVN{kube.Kube{fakeClient}, anpfake.NewSimpleClientset(), egressipv1fake.NewSimpleClientset(), &egressfirewallfake.Clientset{}, nil}, existingNode.Name)
 	waiter := newStartupWaiter()
 
 	err = testNS.Do(func(ns.NetNS) error {
@@ -321,7 +322,7 @@ func testManagementPortDPU(ctx *cli.Context, fexec *ovntest.FakeExec, testNS ns.
 	_, err = config.InitConfig(ctx, fexec, nil)
 	Expect(err).NotTo(HaveOccurred())
 
-	nodeAnnotator := kube.NewNodeAnnotator(&kube.KubeOVN{kube.Kube{fakeClient}, egressipv1fake.NewSimpleClientset(), &egressfirewallfake.Clientset{}, nil}, existingNode.Name)
+	nodeAnnotator := kube.NewNodeAnnotator(&kube.KubeOVN{kube.Kube{fakeClient}, anpfake.NewSimpleClientset(), egressipv1fake.NewSimpleClientset(), &egressfirewallfake.Clientset{}, nil}, existingNode.Name)
 	waiter := newStartupWaiter()
 
 	err = testNS.Do(func(ns.NetNS) error {

@@ -6,6 +6,11 @@ import (
 	"sync/atomic"
 	"time"
 
+	anpapi "sigs.k8s.io/network-policy-api/apis/v1alpha1"
+	anpscheme "sigs.k8s.io/network-policy-api/client/clientset/versioned/scheme"
+	anpinformerfactory "sigs.k8s.io/network-policy-api/client/informers/externalversions/apis/v1alpha1"
+	anplister "sigs.k8s.io/network-policy-api/client/listers/apis/v1alpha1"
+
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
 	egressfirewallapi "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressfirewall/v1"
 	egressfirewallscheme "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressfirewall/v1/apis/clientset/versioned/scheme"
@@ -55,6 +60,7 @@ type WatchFactory struct {
 	handlerCounter uint64
 
 	iFactory         informerfactory.SharedInformerFactory
+	anpFactory       anpinformerfactory.SharedInformerFactory
 	eipFactory       egressipinformerfactory.SharedInformerFactory
 	efFactory        egressfirewallinformerfactory.SharedInformerFactory
 	cpipcFactory     ocpcloudnetworkinformerfactory.SharedInformerFactory
@@ -125,6 +131,8 @@ var (
 	EgressFwNodeType                      reflect.Type = reflect.TypeOf(&egressFwNode{})
 	CloudPrivateIPConfigType              reflect.Type = reflect.TypeOf(&ocpcloudnetworkapi.CloudPrivateIPConfig{})
 	EgressQoSType                         reflect.Type = reflect.TypeOf(&egressqosapi.EgressQoS{})
+	AdminNetworkPolicyType                reflect.Type = reflect.TypeOf(&anpapi.AdminNetworkPolicy{})
+	BaselineAdminNetworkPolicyType        reflect.Type = reflect.TypeOf(&anpapi.BaselineAdminNetworkPolicy{})
 	PeerNamespaceAndPodSelectorType       reflect.Type = reflect.TypeOf(&peerNamespaceAndPodSelector{})
 	PeerPodForNamespaceAndPodSelectorType reflect.Type = reflect.TypeOf(&peerPodForNamespaceAndPodSelector{})
 	PeerNamespaceSelectorType             reflect.Type = reflect.TypeOf(&peerNamespaceSelector{})
@@ -151,12 +159,17 @@ func NewMasterWatchFactory(ovnClientset *util.OVNMasterClientset) (*WatchFactory
 	// However, AddEventHandlerWithResyncPeriod can specify a per handler resync period
 	wf := &WatchFactory{
 		iFactory:         informerfactory.NewSharedInformerFactory(ovnClientset.KubeClient, resyncInterval),
+		anpFactory:       anpinformerfactory.NewSharedInformerFactory(ovnClientset.ANPClient, resyncInterval),
 		eipFactory:       egressipinformerfactory.NewSharedInformerFactory(ovnClientset.EgressIPClient, resyncInterval),
 		efFactory:        egressfirewallinformerfactory.NewSharedInformerFactory(ovnClientset.EgressFirewallClient, resyncInterval),
 		cpipcFactory:     ocpcloudnetworkinformerfactory.NewSharedInformerFactory(ovnClientset.CloudNetworkClient, resyncInterval),
 		egressQoSFactory: egressqosinformerfactory.NewSharedInformerFactory(ovnClientset.EgressQoSClient, resyncInterval),
 		informers:        make(map[reflect.Type]*informer),
 		stopChan:         make(chan struct{}),
+	}
+
+	if err := anpapi.AddToScheme(anpscheme.Scheme); err != nil {
+		return nil, err
 	}
 
 	if err := egressipapi.AddToScheme(egressipscheme.Scheme); err != nil {
@@ -222,6 +235,16 @@ func NewMasterWatchFactory(ovnClientset *util.OVNMasterClientset) (*WatchFactory
 	if err != nil {
 		return nil, err
 	}
+	if config.OVNKubernetesFeature.EnableAdminNetworkPolicy {
+		wf.informers[AdminNetworkPolicyType], err = newInformer(AdminNetworkPolicyType, wf.anpFactory.Policy().V1alpha1().AdminNetworkPolicies().Informer())
+		if err != nil {
+			return nil, err
+		}
+		wf.informers[BaselineAdminNetworkPolicyType], err = newInformer(BaselineAdminNetworkPolicyType, wf.anpFactory.Policy().V1alpha1().BaselineAdminNetworkPolicies().Informer())
+		if err != nil {
+			return nil, err
+		}
+	}
 	if config.OVNKubernetesFeature.EnableEgressIP {
 		wf.informers[EgressIPType], err = newInformer(EgressIPType, wf.eipFactory.K8s().V1().EgressIPs().Informer())
 		if err != nil {
@@ -256,6 +279,14 @@ func (wf *WatchFactory) Start() error {
 	for oType, synced := range wf.iFactory.WaitForCacheSync(wf.stopChan) {
 		if !synced {
 			return fmt.Errorf("error in syncing cache for %v informer", oType)
+		}
+	}
+	if config.OVNKubernetesFeature.EnableAdminNetworkPolicy && wf.anpFactory != nil {
+		wf.anpFactory.Start(wf.stopChan)
+		for oType, synced := range wf.anpFactory.WaitForCacheSync(wf.stopChan) {
+			if !synced {
+				return fmt.Errorf("error in syncing cache for %v informer", oType)
+			}
 		}
 	}
 	if config.OVNKubernetesFeature.EnableEgressIP && wf.eipFactory != nil {
@@ -414,6 +445,14 @@ func getObjectMeta(objType reflect.Type, obj interface{}) (*metav1.ObjectMeta, e
 	case PolicyType:
 		if policy, ok := obj.(*knet.NetworkPolicy); ok {
 			return &policy.ObjectMeta, nil
+		}
+	case AdminNetworkPolicyType:
+		if adminNetworkPolicy, ok := obj.(*anpapi.AdminNetworkPolicy); ok {
+			return &adminNetworkPolicy.ObjectMeta, nil
+		}
+	case BaselineAdminNetworkPolicyType:
+		if baselineAdminNetworkPolicy, ok := obj.(*anpapi.BaselineAdminNetworkPolicy); ok {
+			return &baselineAdminNetworkPolicy.ObjectMeta, nil
 		}
 	case NamespaceType:
 		if namespace, ok := obj.(*kapi.Namespace); ok {
@@ -800,6 +839,26 @@ func (wf *WatchFactory) GetCloudPrivateIPConfig(name string) (*ocpcloudnetworkap
 	return cloudPrivateIPConfigLister.Get(name)
 }
 
+func (wf *WatchFactory) GetANP(name string) (*anpapi.AdminNetworkPolicy, error) {
+	anpLister := wf.informers[AdminNetworkPolicyType].lister.(anplister.AdminNetworkPolicyLister)
+	return anpLister.Get(name)
+}
+
+func (wf *WatchFactory) GetANPs() ([]*anpapi.AdminNetworkPolicy, error) {
+	anpLister := wf.informers[AdminNetworkPolicyType].lister.(anplister.AdminNetworkPolicyLister)
+	return anpLister.List(labels.Everything())
+}
+
+func (wf *WatchFactory) GetBANP(name string) (*anpapi.BaselineAdminNetworkPolicy, error) {
+	banpLister := wf.informers[BaselineAdminNetworkPolicyType].lister.(anplister.BaselineAdminNetworkPolicyLister)
+	return banpLister.Get(name)
+}
+
+func (wf *WatchFactory) GetBANPs() ([]*anpapi.BaselineAdminNetworkPolicy, error) {
+	banpLister := wf.informers[BaselineAdminNetworkPolicyType].lister.(anplister.BaselineAdminNetworkPolicyLister)
+	return banpLister.List(labels.Everything())
+}
+
 func (wf *WatchFactory) GetEgressIP(name string) (*egressipapi.EgressIP, error) {
 	egressIPLister := wf.informers[EgressIPType].lister.(egressiplister.EgressIPLister)
 	return egressIPLister.Get(name)
@@ -890,6 +949,14 @@ func (wf *WatchFactory) ServiceInformer() cache.SharedIndexInformer {
 
 func (wf *WatchFactory) EgressQoSInformer() egressqosinformer.EgressQoSInformer {
 	return wf.egressQoSFactory.K8s().V1().EgressQoSes()
+}
+
+func (wf *WatchFactory) ANPInformer() anpinformer.AdminNetworkPolicyInformer {
+	return wf.anpFactory.Policy().V1alpha1().AdminNetworkPolicies()
+}
+
+func (wf *WatchFactory) BANPInformer() anpinformer.BaselineAdminNetworkPolicyInformer {
+	return wf.anpFactory.Policy().V1alpha1().BaselineAdminNetworkPolicies()
 }
 
 // withServiceNameAndNoHeadlessServiceSelector returns a LabelSelector (added to the
