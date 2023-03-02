@@ -603,6 +603,8 @@ net_cidr=${net_cidr} svc_cidr=${svc_cidr} \
   j2 ../templates/ovn-setup.yaml.j2 -o ${output_dir}/ovn-setup.yaml
 
 cp ../templates/ovnkube-monitor.yaml.j2 ${output_dir}/ovnkube-monitor.yaml
+cp ../templates/policy.networking.k8s.io_adminnetworkpolicies.yaml.j2 ${output_dir}/policy.networking.k8s.io_adminnetworkpolicies.yaml
+cp ../templates/policy.networking.k8s.io_baselineadminnetworkpolicies.yaml.j2 ${output_dir}/policy.networking.k8s.io_baselineadminnetworkpolicies.yaml
 cp ../templates/k8s.ovn.org_egressfirewalls.yaml.j2 ${output_dir}/k8s.ovn.org_egressfirewalls.yaml
 cp ../templates/k8s.ovn.org_egressips.yaml.j2 ${output_dir}/k8s.ovn.org_egressips.yaml
 cp ../templates/k8s.ovn.org_egressqoses.yaml.j2 ${output_dir}/k8s.ovn.org_egressqoses.yaml
