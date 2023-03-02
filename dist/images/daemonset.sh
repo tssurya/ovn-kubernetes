@@ -59,6 +59,7 @@ OVN_DISABLE_SNAT_MULTIPLE_GWS=""
 OVN_DISABLE_PKT_MTU_CHECK=""
 OVN_EMPTY_LB_EVENTS=""
 OVN_MULTICAST_ENABLE=""
+OVN_ADMIN_NETWORK_POLICY_ENABLE=""
 OVN_EGRESSIP_ENABLE=
 OVN_EGRESSIP_HEALTHCHECK_PORT=
 OVN_EGRESSFIREWALL_ENABLE=
@@ -209,6 +210,9 @@ while [ "$1" != "" ]; do
   --multicast-enabled)
     OVN_MULTICAST_ENABLE=$VALUE
     ;;
+  --admin-network-policy-enable)
+    OVN_ADMIN_NETWORK_POLICY_ENABLE=$VALUE
+    ;;
   --egress-ip-enable)
     OVN_EGRESSIP_ENABLE=$VALUE
     ;;
@@ -331,6 +335,8 @@ ovn_acl_logging_rate_limit=${OVN_ACL_LOGGING_RATE_LIMIT:-"20"}
 echo "ovn_acl_logging_rate_limit: ${ovn_acl_logging_rate_limit}"
 ovn_hybrid_overlay_enable=${OVN_HYBRID_OVERLAY_ENABLE}
 echo "ovn_hybrid_overlay_enable: ${ovn_hybrid_overlay_enable}"
+ovn_admin_network_policy_enable=${OVN_ADMIN_NETWORK_POLICY_ENABLE}
+echo "ovn_admin_network_policy_enable: ${ovn_admin_network_policy_enable}"
 ovn_egress_ip_enable=${OVN_EGRESSIP_ENABLE}
 echo "ovn_egress_ip_enable: ${ovn_egress_ip_enable}"
 ovn_egress_ip_healthcheck_port=${OVN_EGRESSIP_HEALTHCHECK_PORT}
@@ -423,6 +429,7 @@ ovn_image=${image} \
   ovn_v4_join_subnet=${ovn_v4_join_subnet} \
   ovn_v6_join_subnet=${ovn_v6_join_subnet} \
   ovn_multicast_enable=${ovn_multicast_enable} \
+  ovn_admin_network_policy_enable=${ovn_admin_network_policy_enable}\
   ovn_egress_ip_enable=${ovn_egress_ip_enable} \
   ovn_egress_ip_healthcheck_port=${ovn_egress_ip_healthcheck_port} \
   ovn_multi_network_enable=${ovn_multi_network_enable} \
@@ -465,6 +472,7 @@ ovn_image=${image} \
   ovn_v4_join_subnet=${ovn_v4_join_subnet} \
   ovn_v6_join_subnet=${ovn_v6_join_subnet} \
   ovn_multicast_enable=${ovn_multicast_enable} \
+  ovn_admin_network_policy_enable=${ovn_admin_network_policy_enable}\
   ovn_egress_ip_enable=${ovn_egress_ip_enable} \
   ovn_egress_ip_healthcheck_port=${ovn_egress_ip_healthcheck_port} \
   ovn_netflow_targets=${ovn_netflow_targets} \
@@ -495,6 +503,7 @@ ovn_image=${image} \
   ovn_v4_join_subnet=${ovn_v4_join_subnet} \
   ovn_v6_join_subnet=${ovn_v6_join_subnet} \
   ovn_multicast_enable=${ovn_multicast_enable} \
+  ovn_admin_network_policy_enable=${ovn_admin_network_policy_enable}\
   ovn_egress_ip_enable=${ovn_egress_ip_enable} \
   ovn_egress_ip_healthcheck_port=${ovn_egress_ip_healthcheck_port} \
   ovn_egress_firewall_enable=${ovn_egress_firewall_enable} \
