@@ -597,5 +597,7 @@ cp ../templates/ovnkube-monitor.yaml.j2 ${output_dir}/ovnkube-monitor.yaml
 cp ../templates/k8s.ovn.org_egressfirewalls.yaml.j2 ${output_dir}/k8s.ovn.org_egressfirewalls.yaml
 cp ../templates/k8s.ovn.org_egressips.yaml.j2 ${output_dir}/k8s.ovn.org_egressips.yaml
 cp ../templates/k8s.ovn.org_egressqoses.yaml.j2 ${output_dir}/k8s.ovn.org_egressqoses.yaml
+cp ../templates/policy.networking.k8s.io_adminnetworkpolicies.yaml ${output_dir}/policy.networking.k8s.io_adminnetworkpolicies.yaml
+cp ../templates/policy.networking.k8s.io_baselineadminnetworkpolicies.yaml ${output_dir}/policy.networking.k8s.io_baselineadminnetworkpolicies.yaml
 
 exit 0
