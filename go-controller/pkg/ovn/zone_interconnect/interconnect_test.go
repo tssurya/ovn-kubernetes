@@ -41,6 +41,9 @@ const (
 
 	// ovnNodeSubnetsAnnotation is the node annotation name to store the node subnets.
 	ovnNodeSubnetsAnnotation = "k8s.ovn.org/node-subnets"
+
+	// ovnNodeNetworkIDsAnnotation is the node annotation name to store the network ids.
+	ovnNodeNetworkIDsAnnotation = "k8s.ovn.org/network-ids"
 )
 
 func newClusterJoinSwitch() *nbdb.LogicalSwitch {
@@ -296,6 +299,7 @@ var _ = ginkgo.Describe("Zone Interconnect Operations", func() {
 						ovnNodeSubnetsAnnotation:           "{\"default\":[\"10.244.2.0/24\"]}",
 						ovnTransitSwitchPortAddrAnnotation: "{\"ipv4\":\"168.254.0.2/16\"}",
 						ovnNodeGRLRPAddrAnnotaton:          "{\"ipv4\":\"100.64.0.2/16\"}",
+						ovnNodeNetworkIDsAnnotation:        "{\"default\":\"0\"}",
 					},
 				},
 				Status: v1.NodeStatus{
@@ -313,6 +317,7 @@ var _ = ginkgo.Describe("Zone Interconnect Operations", func() {
 						ovnNodeSubnetsAnnotation:           "{\"default\":[\"10.244.3.0/24\"]}",
 						ovnTransitSwitchPortAddrAnnotation: "{\"ipv4\":\"168.254.0.3/16\"}",
 						ovnNodeGRLRPAddrAnnotaton:          "{\"ipv4\":\"100.64.0.3/16\"}",
+						ovnNodeNetworkIDsAnnotation:        "{\"default\":\"0\"}",
 					},
 				},
 				Status: v1.NodeStatus{
@@ -330,6 +335,7 @@ var _ = ginkgo.Describe("Zone Interconnect Operations", func() {
 						ovnNodeSubnetsAnnotation:           "{\"default\":[\"10.244.4.0/24\"]}",
 						ovnTransitSwitchPortAddrAnnotation: "{\"ipv4\":\"168.254.0.4/16\"}",
 						ovnNodeGRLRPAddrAnnotaton:          "{\"ipv4\":\"100.64.0.4/16\"}",
+						ovnNodeNetworkIDsAnnotation:        "{\"default\":\"0\"}",
 					},
 				},
 				Status: v1.NodeStatus{
@@ -448,6 +454,7 @@ var _ = ginkgo.Describe("Zone Interconnect Operations", func() {
 						ovnNodeSubnetsAnnotation:           "{\"blue\":[\"10.244.2.0/24\"]}",
 						ovnTransitSwitchPortAddrAnnotation: "{\"ipv4\":\"168.254.0.2/16\"}",
 						ovnNodeGRLRPAddrAnnotaton:          "{\"ipv4\":\"100.64.0.2/16\"}",
+						ovnNodeNetworkIDsAnnotation:        "{\"blue\":\"1\"}",
 					},
 				},
 				Status: v1.NodeStatus{
@@ -465,6 +472,7 @@ var _ = ginkgo.Describe("Zone Interconnect Operations", func() {
 						ovnNodeSubnetsAnnotation:           "{\"blue\":[\"10.244.3.0/24\"]}",
 						ovnTransitSwitchPortAddrAnnotation: "{\"ipv4\":\"168.254.0.3/16\"}",
 						ovnNodeGRLRPAddrAnnotaton:          "{\"ipv4\":\"100.64.0.3/16\"}",
+						ovnNodeNetworkIDsAnnotation:        "{\"blue\":\"1\"}",
 					},
 				},
 				Status: v1.NodeStatus{
@@ -482,6 +490,7 @@ var _ = ginkgo.Describe("Zone Interconnect Operations", func() {
 						ovnNodeSubnetsAnnotation:           "{\"blue\":[\"10.244.4.0/24\"]}",
 						ovnTransitSwitchPortAddrAnnotation: "{\"ipv4\":\"168.254.0.4/16\"}",
 						ovnNodeGRLRPAddrAnnotaton:          "{\"ipv4\":\"100.64.0.4/16\"}",
+						ovnNodeNetworkIDsAnnotation:        "{\"blue\":\"1\"}",
 					},
 				},
 				Status: v1.NodeStatus{
@@ -579,6 +588,11 @@ var _ = ginkgo.Describe("Zone Interconnect Operations", func() {
 				// Set the node transit switch port ips
 				testNode4.Annotations[ovnTransitSwitchPortAddrAnnotation] = "{\"ipv4\":\"168.254.0.5/16\"}"
 				err = zoneICHandler.AddLocalZoneNode(&testNode4)
+				gomega.Expect(err).To(gomega.HaveOccurred(), "failed to get the network id for the network default on node node4")
+
+				// Set the network id for default network
+				testNode4.Annotations[ovnNodeNetworkIDsAnnotation] = "{\"default\":\"0\"}"
+				err = zoneICHandler.AddLocalZoneNode(&testNode4)
 				gomega.Expect(err).To(gomega.HaveOccurred(), "failed to create/update cluster router ovn_cluster_router to add transit switch port rtots-node4 for the node node4")
 
 				// Create the cluster router
@@ -666,6 +680,11 @@ var _ = ginkgo.Describe("Zone Interconnect Operations", func() {
 				// Set the node transit switch port ips
 				testNode4.Annotations[ovnTransitSwitchPortAddrAnnotation] = "{\"ipv4\":\"168.254.0.5/16\"}"
 				err = zoneICHandler.AddRemoteZoneNode(&testNode4)
+				gomega.Expect(err).To(gomega.HaveOccurred(), "failed to get the network id for the network default on node node4")
+
+				// Set the network id for default network
+				testNode4.Annotations[ovnNodeNetworkIDsAnnotation] = "{\"default\":\"0\"}"
+				err = zoneICHandler.AddLocalZoneNode(&testNode4)
 				gomega.Expect(err).To(gomega.HaveOccurred(), "failed to update chassis node4 for remote port tstor-node4")
 
 				// Create remote chassis
