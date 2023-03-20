@@ -709,6 +709,36 @@ func DeleteLogicalRouterStaticRoutesWithPredicate(nbClient libovsdbclient.Client
 	return m.Delete(opModels...)
 }
 
+// DeleteLogicalRouterStaticRoutesWithPredicateOps looks up logical router static
+// routes from the cache based on a given predicate, and returns the ops to delete
+// them and remove them from the provided logical router
+func DeleteLogicalRouterStaticRoutesWithPredicateOps(nbClient libovsdbclient.Client, ops []libovsdb.Operation, routerName string, p logicalRouterStaticRoutePredicate) ([]libovsdb.Operation, error) {
+	router := &nbdb.LogicalRouter{
+		Name: routerName,
+	}
+
+	deleted := []*nbdb.LogicalRouterStaticRoute{}
+	opModels := []operationModel{
+		{
+			ModelPredicate: p,
+			ExistingResult: &deleted,
+			DoAfter:        func() { router.StaticRoutes = extractUUIDsFromModels(deleted) },
+			ErrNotFound:    false,
+			BulkOp:         true,
+		},
+		{
+			Model:            router,
+			ModelPredicate:   func(item *nbdb.LogicalRouter) bool { return item.Name == router.Name },
+			OnModelMutations: []interface{}{&router.StaticRoutes},
+			ErrNotFound:      true,
+			BulkOp:           false,
+		},
+	}
+
+	m := newModelClient(nbClient)
+	return m.DeleteOps(ops, opModels...)
+}
+
 // DeleteLogicalRouterStaticRoutes deletes the logical router static routes and
 // removes them from the provided logical router
 func DeleteLogicalRouterStaticRoutes(nbClient libovsdbclient.Client, routerName string, lrsrs ...*nbdb.LogicalRouterStaticRoute) error {
