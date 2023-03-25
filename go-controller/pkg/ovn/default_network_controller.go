@@ -94,7 +94,7 @@ type DefaultNetworkController struct {
 	defaultCOPPUUID string
 
 	// Controller used for programming OVN for egress IP
-	eIPC egressIPController
+	eIPC egressIPZoneController
 
 	// Controller used to handle services
 	svcController *svccontroller.Controller
@@ -205,13 +205,12 @@ func newDefaultNetworkControllerCommon(cnci *CommonNetworkControllerInfo,
 		networkPolicies:        syncmap.NewSyncMap[*networkPolicy](),
 		sharedNetpolPortGroups: syncmap.NewSyncMap[*defaultDenyPortGroups](),
 		podSelectorAddressSets: syncmap.NewSyncMap[*PodSelectorAddressSet](),
-		eIPC: egressIPController{
+		eIPC: egressIPZoneController{
 			egressIPAssignmentMutex:           &sync.Mutex{},
 			podAssignmentMutex:                &sync.Mutex{},
 			podAssignment:                     make(map[string]*podAssignmentState),
 			pendingCloudPrivateIPConfigsMutex: &sync.Mutex{},
 			pendingCloudPrivateIPConfigsOps:   make(map[string]map[string]*cloudPrivateIPConfigOp),
-			allocator:                         allocator{&sync.Mutex{}, make(map[string]*egressNode)},
 			nbClient:                          cnci.nbClient,
 			watchFactory:                      cnci.watchFactory,
 			egressIPTotalTimeout:              config.OVNKubernetesFeature.EgressIPReachabiltyTotalTimeout,
@@ -780,22 +779,21 @@ func (h *defaultNetworkControllerEventHandler) AddResource(obj interface{}, from
 
 	case factory.EgressNodeType:
 		node := obj.(*kapi.Node)
+		// Add the node to the tracker only if it belongs to the local zone.
+		klog.Infof("SURYA %v", config.OVNKubernetesFeature.EnableInterconnect)
+		if config.OVNKubernetesFeature.EnableInterconnect && h.oc.isLocalZoneNode(node) {
+			klog.Infof("SURYA %v", node.Name)
+			h.oc.eIPC.localZoneNodes.LoadOrStore(node.Name, true)
+		}
 		if err := h.oc.setupNodeForEgress(node); err != nil {
 			return err
 		}
 		nodeEgressLabel := util.GetNodeEgressLabel()
 		nodeLabels := node.GetLabels()
 		_, hasEgressLabel := nodeLabels[nodeEgressLabel]
-		if hasEgressLabel {
-			h.oc.setNodeEgressAssignable(node.Name, true)
-		}
 		isReady := h.oc.isEgressNodeReady(node)
-		if isReady {
-			h.oc.setNodeEgressReady(node.Name, true)
-		}
-		isReachable := h.oc.isEgressNodeReachable(node)
-		if hasEgressLabel && isReachable && isReady {
-			h.oc.setNodeEgressReachable(node.Name, true)
+		klog.Infof("SURYA %v, %v", hasEgressLabel, isReady)
+		if hasEgressLabel && isReady {
 			if err := h.oc.addEgressNode(node.Name); err != nil {
 				return err
 			}
@@ -911,7 +909,13 @@ func (h *defaultNetworkControllerEventHandler) UpdateResource(oldObj, newObj int
 	case factory.EgressNodeType:
 		oldNode := oldObj.(*kapi.Node)
 		newNode := newObj.(*kapi.Node)
-
+		// Add the node to the tracker only if it belongs to the local zone.
+		// TODO: Find a better place to put this. See if LoadOrStore has any perf impact if its called too frequently
+		klog.Infof("SURYA %v", config.OVNKubernetesFeature.EnableInterconnect)
+		if config.OVNKubernetesFeature.EnableInterconnect && h.oc.isLocalZoneNode(newNode) {
+			klog.Infof("SURYA %v", newNode.Name)
+			h.oc.eIPC.localZoneNodes.LoadOrStore(newNode.Name, true)
+		}
 		// Check if the node's internal addresses changed. If so,
 		// delete and readd the node for egress to update LR policies.
 		// We are only interested in the IPs here, not the subnet information.
@@ -927,14 +931,6 @@ func (h *defaultNetworkControllerEventHandler) UpdateResource(oldObj, newObj int
 			}
 		}
 
-		// Initialize the allocator on every update,
-		// ovnkube-node/cloud-network-config-controller will make sure to
-		// annotate the node with the egressIPConfig, but that might have
-		// happened after we processed the ADD for that object, hence keep
-		// retrying for all UPDATEs.
-		if err := h.oc.initEgressIPAllocator(newNode); err != nil {
-			klog.Warningf("Egress node initialization error: %v", err)
-		}
 		nodeEgressLabel := util.GetNodeEgressLabel()
 		oldLabels := oldNode.GetLabels()
 		newLabels := newNode.GetLabels()
@@ -946,19 +942,15 @@ func (h *defaultNetworkControllerEventHandler) UpdateResource(oldObj, newObj int
 		if !oldHadEgressLabel && !newHasEgressLabel {
 			return nil
 		}
-		h.oc.setNodeEgressAssignable(newNode.Name, newHasEgressLabel)
 		if oldHadEgressLabel && !newHasEgressLabel {
 			klog.Infof("Node: %s has been un-labeled, deleting it from egress assignment", newNode.Name)
 			return h.oc.deleteEgressNode(oldNode.Name)
 		}
 		isOldReady := h.oc.isEgressNodeReady(oldNode)
 		isNewReady := h.oc.isEgressNodeReady(newNode)
-		isNewReachable := h.oc.isEgressNodeReachable(newNode)
-		h.oc.setNodeEgressReady(newNode.Name, isNewReady)
 		if !oldHadEgressLabel && newHasEgressLabel {
 			klog.Infof("Node: %s has been labeled, adding it for egress assignment", newNode.Name)
-			if isNewReady && isNewReachable {
-				h.oc.setNodeEgressReachable(newNode.Name, isNewReachable)
+			if isNewReady {
 				if err := h.oc.addEgressNode(newNode.Name); err != nil {
 					return err
 				}
@@ -976,9 +968,8 @@ func (h *defaultNetworkControllerEventHandler) UpdateResource(oldObj, newObj int
 			if err := h.oc.deleteEgressNode(newNode.Name); err != nil {
 				return err
 			}
-		} else if isNewReady && isNewReachable {
+		} else if isNewReady {
 			klog.Infof("Node: %s is ready and reachable, adding it for egress assignment", newNode.Name)
-			h.oc.setNodeEgressReachable(newNode.Name, isNewReachable)
 			if err := h.oc.addEgressNode(newNode.Name); err != nil {
 				return err
 			}
@@ -1087,6 +1078,9 @@ func (h *defaultNetworkControllerEventHandler) DeleteResource(obj, cachedObj int
 
 	case factory.EgressNodeType:
 		node := obj.(*kapi.Node)
+		if config.OVNKubernetesFeature.EnableInterconnect && h.oc.isLocalZoneNode(node) {
+			h.oc.eIPC.localZoneNodes.Delete(node.Name)
+		}
 		if err := h.oc.deleteNodeForEgress(node); err != nil {
 			return err
 		}

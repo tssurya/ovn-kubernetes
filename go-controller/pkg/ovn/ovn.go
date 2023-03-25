@@ -525,10 +525,10 @@ func newEgressServiceController(client clientset.Interface, nbClient libovsdbcli
 		}
 
 		if hcPort == 0 {
-			return isReachableLegacy(nodeName, mgmtIPs, timeout)
+			return egresssvc.IsReachableLegacy(nodeName, mgmtIPs, timeout)
 		}
 
-		return isReachableViaGRPC(mgmtIPs, healthClient, hcPort, timeout)
+		return egresssvc.IsReachableViaGRPC(mgmtIPs, healthClient, hcPort, timeout)
 	}
 
 	return egresssvc.NewController(controllerName, client, nbClient, addressSetFactory,

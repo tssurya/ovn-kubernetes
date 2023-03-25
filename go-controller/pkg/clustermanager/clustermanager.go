@@ -25,6 +25,8 @@ type ClusterManager struct {
 	wf                          *factory.WatchFactory
 	wg                          *sync.WaitGroup
 	secondaryNetClusterManager  *secondaryNetworkClusterManager
+	// Controller used for programming OVN for egress IP
+	eIPC *egressIPController
 	// event recorder used to post events to k8s
 	recorder record.EventRecorder
 
@@ -55,6 +57,9 @@ func NewClusterManager(ovnClient *util.OVNClusterManagerClientset, wf *factory.W
 			return nil, err
 		}
 	}
+	if config.OVNKubernetesFeature.EnableEgressIP {
+		cm.eIPC = newEgressIPController(ovnClient, wf, recorder)
+	}
 	return cm, nil
 }
 
@@ -78,6 +83,12 @@ func (cm *ClusterManager) Start(ctx context.Context) error {
 
 	if config.OVNKubernetesFeature.EnableMultiNetwork {
 		if err := cm.secondaryNetClusterManager.Start(); err != nil {
+			return err
+		}
+	}
+
+	if config.OVNKubernetesFeature.EnableEgressIP {
+		if err := cm.eIPC.Start(); err != nil {
 			return err
 		}
 	}

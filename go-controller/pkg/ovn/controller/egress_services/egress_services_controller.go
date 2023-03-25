@@ -128,7 +128,6 @@ func NewController(
 		createNoRerouteNodePolicies:              createNoRerouteNodePolicies,
 		deleteNoRerouteNodePolicies:              deleteNoRerouteNodePolicies,
 		deleteLegacyDefaultNoRerouteNodePolicies: deleteLegacyDefaultNoRerouteNodePolicies,
-		IsReachable:                              isReachable,
 		stopCh:                                   stopCh,
 		services:                                 map[string]*svcState{},
 		nodes:                                    map[string]*nodeState{},
