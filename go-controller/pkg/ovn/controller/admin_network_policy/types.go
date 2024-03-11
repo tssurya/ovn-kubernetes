@@ -184,11 +184,15 @@ func newAdminNetworkPolicySubject(raw anpapi.AdminNetworkPolicySubject) (*adminN
 func newAdminNetworkPolicyPort(raw anpapi.AdminNetworkPolicyPort) *libovsdbutil.NetworkPolicyPort {
 	anpPort := &libovsdbutil.NetworkPolicyPort{}
 	if raw.PortNumber != nil {
-		anpPort = libovsdbutil.GetNetworkPolicyPort(raw.PortNumber.Protocol, raw.PortNumber.Port, 0)
+		anpPort = libovsdbutil.GetNetworkPolicyPort(raw.PortNumber.Protocol, raw.PortNumber.Port, 0, "")
 	} else if raw.NamedPort != nil {
 		// TODO: Add support for this
+		// store the string name
+		// Inside convertANPRuleToACL and getL4Match
+		// do something specific for namedPorts
+		anpPort = libovsdbutil.GetNetworkPolicyPort("", 0, 0, *raw.NamedPort)
 	} else {
-		anpPort = libovsdbutil.GetNetworkPolicyPort(raw.PortRange.Protocol, raw.PortRange.Start, raw.PortRange.End)
+		anpPort = libovsdbutil.GetNetworkPolicyPort(raw.PortRange.Protocol, raw.PortRange.Start, raw.PortRange.End, "")
 	}
 	return anpPort
 }

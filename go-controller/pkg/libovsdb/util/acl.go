@@ -226,7 +226,7 @@ const (
 )
 
 // convertK8sProtocolToOVNProtocol returns the OVN syntax-specific protocol value for a v1.Protocol K8s type
-func convertK8sProtocolToOVNProtocol(proto v1.Protocol) string {
+func ConvertK8sProtocolToOVNProtocol(proto v1.Protocol) string {
 	var protocol string
 	switch proto {
 	case v1.ProtocolTCP:
@@ -246,15 +246,17 @@ type NetworkPolicyPort struct {
 	Protocol string // will store the OVN protocol string syntax for the corresponding K8s protocol
 	Port     int32  // will store startPort if its a range
 	EndPort  int32
+	Name     string // saves NamedPort if provided
 }
 
 // GetNetworkPolicyPort returns an internal NetworkPolicyPort struct
 // It also sets the provided protocol, port and endPort fields
-func GetNetworkPolicyPort(proto v1.Protocol, port, endPort int32) *NetworkPolicyPort {
+func GetNetworkPolicyPort(proto v1.Protocol, port, endPort int32, name string) *NetworkPolicyPort {
 	return &NetworkPolicyPort{
-		Protocol: convertK8sProtocolToOVNProtocol(proto),
+		Protocol: ConvertK8sProtocolToOVNProtocol(proto),
 		Port:     port,
 		EndPort:  endPort,
+		Name:     name,
 	}
 }
 
@@ -269,6 +271,9 @@ type gressRulePortsForL4ACLMatch struct {
 func getProtocolPortsMap(rulePorts []*NetworkPolicyPort) map[string]*gressRulePortsForL4ACLMatch {
 	gressProtoPortsMap := make(map[string]*gressRulePortsForL4ACLMatch)
 	for _, pp := range rulePorts {
+		if pp.Name != "" {
+			continue // don't process namedPorts here (NetPol doesn't support namedPorts, AdminNetPol processes it later)
+		}
 		gpp, ok := gressProtoPortsMap[pp.Protocol]
 		if !ok {
 			gpp = &gressRulePortsForL4ACLMatch{portList: []string{}, portRange: []string{}}

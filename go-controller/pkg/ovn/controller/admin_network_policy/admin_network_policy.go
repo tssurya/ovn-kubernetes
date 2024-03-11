@@ -133,7 +133,7 @@ func (c *Controller) ensureAdminNetworkPolicy(anp *anpapi.AdminNetworkPolicy) er
 		return fmt.Errorf("unable to construct IPsets for anp %s: %v", desiredANPState.name, err)
 	}
 	atLeastOneRuleUpdated := false
-	desiredACLs := c.convertANPRulesToACLs(desiredANPState, currentANPState, portGroupName, &atLeastOneRuleUpdated, false)
+	desiredACLs, err := c.convertANPRulesToACLs(desiredANPState, currentANPState, portGroupName, &atLeastOneRuleUpdated, false)
 
 	if !loaded {
 		// this is a fresh ANP create
@@ -176,7 +176,8 @@ func (c *Controller) ensureAdminNetworkPolicy(anp *anpapi.AdminNetworkPolicy) er
 // convertANPRulesToACLs takes all the rules belonging to the ANP and initiates the conversion of rule->acl
 // if currentANPState exists; then we also see if any of the current v/s desired ACLs had a state change
 // and if so, we return atLeastOneRuleUpdated=true
-func (c *Controller) convertANPRulesToACLs(desiredANPState, currentANPState *adminNetworkPolicyState, pgName string, atLeastOneRuleUpdated *bool, isBanp bool) []*nbdb.ACL {
+func (c *Controller) convertANPRulesToACLs(desiredANPState, currentANPState *adminNetworkPolicyState, pgName string,
+	atLeastOneRuleUpdated *bool, isBanp bool) ([]*nbdb.ACL, error) {
 	acls := []*nbdb.ACL{}
 	// isAtLeastOneRuleUpdatedCheckRequired is set to true, if we had an anp already in cache (update) AND the rule lengths are the same
 	// if the rule lengths are different we do a full peer recompute in ensureAdminNetworkPolicy anyways
@@ -184,7 +185,10 @@ func (c *Controller) convertANPRulesToACLs(desiredANPState, currentANPState *adm
 		len(currentANPState.ingressRules) == len(desiredANPState.ingressRules) &&
 		len(currentANPState.egressRules) == len(desiredANPState.egressRules))
 	for i, ingressRule := range desiredANPState.ingressRules {
-		acl := c.convertANPRuleToACL(ingressRule, pgName, desiredANPState.name, desiredANPState.aclLoggingParams, isBanp)
+		acl, err := c.convertANPRuleToACL(ingressRule, pgName, desiredANPState.name, desiredANPState.aclLoggingParams, isBanp)
+		if err != nil {
+			return nil, fmt.Errorf("unable to construct ACL for ANP %s's ingress rule at index %d; err: %v", desiredANPState.name, i, err)
+		}
 		acls = append(acls, acl...)
 		if isAtLeastOneRuleUpdatedCheckRequired &&
 			!*atLeastOneRuleUpdated &&
@@ -194,7 +198,10 @@ func (c *Controller) convertANPRulesToACLs(desiredANPState, currentANPState *adm
 		}
 	}
 	for i, egressRule := range desiredANPState.egressRules {
-		acl := c.convertANPRuleToACL(egressRule, pgName, desiredANPState.name, desiredANPState.aclLoggingParams, isBanp)
+		acl, err := c.convertANPRuleToACL(egressRule, pgName, desiredANPState.name, desiredANPState.aclLoggingParams, isBanp)
+		if err != nil {
+			return nil, fmt.Errorf("unable to construct ACL for ANP %s's egress rule at index %d; err: %v", desiredANPState.name, i, err)
+		}
 		acls = append(acls, acl...)
 		if isAtLeastOneRuleUpdatedCheckRequired &&
 			!*atLeastOneRuleUpdated &&
@@ -204,12 +211,13 @@ func (c *Controller) convertANPRulesToACLs(desiredANPState, currentANPState *adm
 		}
 	}
 
-	return acls
+	return acls, nil
 }
 
 // convertANPRuleToACL takes the given gressRule and converts it into an ACL(0 ports rule) or
 // multiple ACLs(ports are set) and returns those ACLs for a given gressRule
-func (c *Controller) convertANPRuleToACL(rule *gressRule, pgName, anpName string, aclLoggingParams *libovsdbutil.ACLLoggingLevels, isBanp bool) []*nbdb.ACL {
+func (c *Controller) convertANPRuleToACL(rule *gressRule, pgName, anpName string, aclLoggingParams *libovsdbutil.ACLLoggingLevels,
+	isBanp bool) ([]*nbdb.ACL, error) {
 	klog.V(5).Infof("Creating ACL for rule %d/%s belonging to ANP %s", rule.priority, rule.gressPrefix, anpName)
 	// create match based on direction and address-set name
 	asIndex := GetANPPeerAddrSetDbIDs(anpName, rule.gressPrefix, fmt.Sprintf("%d", rule.gressIndex), c.controllerName, isBanp)
@@ -218,7 +226,12 @@ func (c *Controller) convertANPRuleToACL(rule *gressRule, pgName, anpName string
 	lportMatch := libovsdbutil.GetACLMatch(pgName, "", libovsdbutil.ACLDirection(rule.gressPrefix))
 	var match string
 	acls := []*nbdb.ACL{}
-	// We will have one ACL per protocol if len(rule.ports) > 0 and one single ACL if len(rule.ports) == 0
+	// We will have
+	// - one single ACL if len(rule.ports) == 0
+	// - one ACL per protocol if len(rule.ports) > 0 and len(namedPorts)==0
+	//   (so max 3 ACLs (tcp,udp,sctp) per rule {portNumber, portRange type ports ONLY})
+	// - one ACL per protocol if len(rule.ports) > 0 and one ACL per protocol if len(namedPorts)>0
+	//   (so max 6 ACLs (2tcp,2udp,2sctp) per rule {{portNumber, portRange, namedPorts ALL PRESENT}})
 	for protocol, l4Match := range libovsdbutil.GetL4MatchesFromNetworkPolicyPorts(rule.ports) {
 		if l4Match == libovsdbutil.UnspecifiedL4Match {
 			match = fmt.Sprintf("%s && %s", l3Match, lportMatch)
@@ -235,8 +248,36 @@ func (c *Controller) convertANPRuleToACL(rule *gressRule, pgName, anpName string
 		)
 		acls = append(acls, acl)
 	}
+	// Process match for NamedPorts if any: Note that this is best effort and we won't
+	// retry on errors because this is likely not performant yet.
+	namedPorts := sets.New[string]()
+	for _, port := range rule.ports {
+		if port.Name == "" {
+			continue
+		}
+		namedPorts.Insert(port.Name)
+	}
+	if len(namedPorts) == 0 {
+		return acls, nil // nothing to do
+	}
+	l3l4Matches, err := c.getL3L4MatchesFromNamedPorts(rule.peers, namedPorts, rule.gressPrefix)
+	if err != nil {
+		return nil, fmt.Errorf("error when trying to process namedPort match, err %v, Skipping this logic...", err)
+	}
+	for protocol, l3l4Match := range l3l4Matches {
+		match = fmt.Sprintf("%s && %s", lportMatch, l3l4Match)
+		acl := libovsdbutil.BuildANPACL(
+			getANPRuleACLDbIDs(anpName, rule.gressPrefix, fmt.Sprintf("%d", rule.gressIndex), protocol, c.controllerName, isBanp),
+			int(rule.priority),
+			match,
+			rule.action,
+			libovsdbutil.ACLDirectionToACLPipeline(libovsdbutil.ACLDirection(rule.gressPrefix)),
+			aclLoggingParams,
+		)
+		acls = append(acls, acl)
+	}
 
-	return acls
+	return acls, nil
 }
 
 // convertANPPeersToIPs takes all the peers belonging to each of the ANP rule and initiates the conversion
@@ -297,7 +338,7 @@ func (c *Controller) convertANPPeersToIPSet(peers []*adminNetworkPolicyPeer, pee
 						// move on to next item in the loop
 						continue
 					}
-					return err
+					return err // we won't hit this TBH because the only error that GetPodIPsOfNetwork returns is podIPsNotFound
 				}
 				peerIPs.Insert(util.StringSlice(podIPs)...)
 				podCache.Insert(pod.Name)

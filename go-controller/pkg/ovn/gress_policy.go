@@ -103,11 +103,11 @@ func (gp *gressPolicy) addPeerAddressSets(asHashNameV4, asHashNameV6 string) {
 func (gp *gressPolicy) addPortPolicy(portJSON *knet.NetworkPolicyPort) {
 	var pp *libovsdbutil.NetworkPolicyPort
 	if portJSON.Port != nil && portJSON.EndPort != nil {
-		pp = libovsdbutil.GetNetworkPolicyPort(*portJSON.Protocol, portJSON.Port.IntVal, *portJSON.EndPort)
+		pp = libovsdbutil.GetNetworkPolicyPort(*portJSON.Protocol, portJSON.Port.IntVal, *portJSON.EndPort, "")
 	} else if portJSON.Port != nil {
-		pp = libovsdbutil.GetNetworkPolicyPort(*portJSON.Protocol, portJSON.Port.IntVal, 0)
+		pp = libovsdbutil.GetNetworkPolicyPort(*portJSON.Protocol, portJSON.Port.IntVal, 0, "")
 	} else {
-		pp = libovsdbutil.GetNetworkPolicyPort(*portJSON.Protocol, 0, 0)
+		pp = libovsdbutil.GetNetworkPolicyPort(*portJSON.Protocol, 0, 0, "")
 	}
 	gp.portPolicies = append(gp.portPolicies, pp)
 }

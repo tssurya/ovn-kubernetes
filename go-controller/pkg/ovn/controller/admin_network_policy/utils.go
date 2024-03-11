@@ -13,6 +13,8 @@ import (
 	"github.com/pkg/errors"
 	apierrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/klog/v2"
+	utilnet "k8s.io/utils/net"
 	anpapi "sigs.k8s.io/network-policy-api/apis/v1alpha1"
 )
 
@@ -88,15 +90,18 @@ func GetANPPeerAddrSetDbIDs(name, gressPrefix, gressIndex, controller string, is
 	})
 }
 
+func getDirectionFromGressPrefix(gressPrefix string) string {
+	if gressPrefix == string(libovsdbutil.ACLIngress) {
+		return "src"
+	}
+	return "dst"
+}
+
 // constructMatchFromAddressSet returns the L3Match for an ACL constructed from a gressRule
 func constructMatchFromAddressSet(gressPrefix string, addrSetIndex *libovsdbops.DbObjectIDs) string {
 	hashedAddressSetNameIPv4, hashedAddressSetNameIPv6 := addressset.GetHashNamesForAS(addrSetIndex)
-	var direction, match string
-	if gressPrefix == string(libovsdbutil.ACLIngress) {
-		direction = "src"
-	} else {
-		direction = "dst"
-	}
+	var match string
+	direction := getDirectionFromGressPrefix(gressPrefix)
 
 	switch {
 	case config.IPv4Mode && config.IPv6Mode:
@@ -161,4 +166,91 @@ func getACLLoggingLevelsForANP(annotations map[string]string) (*libovsdbutil.ACL
 		aclLogLevels.Pass = ""
 	}
 	return aclLogLevels, apierrors.NewAggregate(errors)
+}
+
+/* NAMED PORTS LOGIC */
+type L3L4NamedPortMatch struct{
+	ipFamily string
+	L3podIP  string
+	L4podPort string
+}
+
+func (c *Controller) getProtocolPodIPPortMap(rulePeers []*adminNetworkPolicyPeer, namedPorts sets.Set[string]) (map[string]*[]L3L4NamedPortMatch, error) {
+	// {k:protocol(string), v:L3L4NamedPortMatch(struct)}
+	protocolPodIPPortMap := make(map[string]*[]L3L4NamedPortMatch)
+	for _, peer := range rulePeers {
+		for namespace, podCache := range peer.namespaces {
+			podNamespaceLister := c.anpPodLister.Pods(namespace)
+			for _, podName := range podCache.UnsortedList() {
+				pod, err := podNamespaceLister.Get(podName)
+				if err != nil {
+					return nil, err
+				}
+				podIPs, _ := util.GetPodIPsOfNetwork(pod, &util.DefaultNetInfo{})
+				if err != nil {
+					if errors.Is(err, util.ErrNoPodIPFound) {
+						// we ignore podIPsNotFound error here because onANPPodUpdate
+						// will take care of this (if the annotation/LSP add happens later);
+						// no need to add nil podIPs to slice...move on to next item in the loop
+						klog.Infof("SURYA %v/%v", namespace, podName)
+						continue
+					}
+					// we won't hit this condition TBH because the only error that GetPodIPsOfNetwork returns is podIPsNotFound
+					return nil, err
+				}
+				for _, container := range pod.Spec.Containers {
+					for _, port := range container.Ports {
+						if port.Name == "" {
+							continue
+						}
+						if namedPorts.Has(port.Name) {
+							ppp, ok := protocolPodIPPortMap[string(port.Protocol)]
+							if !ok {
+								ppp = &[]L3L4NamedPortMatch{}
+								protocolPodIPPortMap[libovsdbutil.ConvertK8sProtocolToOVNProtocol(port.Protocol)] = ppp
+							}
+							for _, podIP := range podIPs {
+								newPPP := L3L4NamedPortMatch{
+									L4podPort: fmt.Sprintf("%d", port.ContainerPort),
+									L3podIP: podIP.String(),
+								}
+								family := ""
+								if utilnet.IsIPv4(podIP) {
+									family = "ip4"
+								} else {
+									family = "ip6"
+								}
+								newPPP.ipFamily = family
+								*ppp = append(*ppp, newPPP)
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	return protocolPodIPPortMap, nil
+}
+
+func (c *Controller) getL3L4MatchesFromNamedPorts(rulePeers []*adminNetworkPolicyPeer, namedPorts sets.Set[string], gressPrefix string) (map[string]string, error) {
+	// {k:protocol(string), v:l3l4Match(string)}
+	l3l4NamedPortsMatches := make(map[string]string)
+	egressProtoPortsMap, err := c.getProtocolPodIPPortMap(rulePeers, namedPorts)
+	if err != nil {
+		return nil, err
+	}
+	direction := getDirectionFromGressPrefix(gressPrefix)
+	for protocol, egressPortPodIPs := range egressProtoPortsMap {
+		var l3l4match string
+		for i, egressPortPodIP := range *egressPortPodIPs {
+			l3l4match = l3l4match + fmt.Sprintf("(%s.%s == %s && %s.dst == %s)",
+				egressPortPodIP.ipFamily, direction, egressPortPodIP.L3podIP, protocol, egressPortPodIP.L4podPort)
+			if i != len(*egressPortPodIPs)-1 {
+				l3l4match = l3l4match + "||"
+			}
+		}
+		klog.Infof("SURYA %s", fmt.Sprintf("%s && %s", protocol, l3l4match))
+		l3l4NamedPortsMatches[protocol] = fmt.Sprintf("%s && %s", protocol, l3l4match)
+	}
+	return l3l4NamedPortsMatches, nil
 }
