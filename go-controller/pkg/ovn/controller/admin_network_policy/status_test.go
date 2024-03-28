@@ -158,7 +158,7 @@ func TestAddOrUpdateAdminNetworkPolicyStatus(t *testing.T) {
 		},
 	)
 	g.Expect(err).NotTo(gomega.HaveOccurred())
-	err = controller.updateANPStatusToNotReady(&initialANP, zone, message)
+	err = controller.updateANPStatusToNotReady(initialANP.Name, message)
 	g.Expect(err).NotTo(gomega.HaveOccurred())
 	g.Eventually(func() int {
 		latestANP, err := controller.anpLister.Get(anpName)
@@ -172,7 +172,7 @@ func TestAddOrUpdateAdminNetworkPolicyStatus(t *testing.T) {
 	g.Expect(anp.Status.Conditions[0].Reason).To(gomega.Equal(policyNotReadyReason))
 	g.Expect(anp.Status.Conditions[0].Status).To(gomega.Equal(metav1.ConditionFalse))
 
-	err = controller.updateANPStatusToReady(anp, controller.zone)
+	err = controller.updateANPStatusToReady(anp.Name)
 	g.Expect(err).NotTo(gomega.HaveOccurred())
 	g.Eventually(func() int {
 		latestANP, err := controller.anpLister.Get(anpName)
@@ -186,7 +186,7 @@ func TestAddOrUpdateAdminNetworkPolicyStatus(t *testing.T) {
 	g.Expect(anp.Status.Conditions[1].Reason).To(gomega.Equal(policyReadyReason))
 	g.Expect(anp.Status.Conditions[1].Status).To(gomega.Equal(metav1.ConditionTrue))
 
-	err = controller.updateBANPStatusToNotReady(&initialBANP, zone, message)
+	err = controller.updateBANPStatusToNotReady(initialBANP.Name, message)
 	g.Expect(err).NotTo(gomega.HaveOccurred())
 	g.Eventually(func() int {
 		latestBANP, err := controller.banpLister.Get(banpName)
@@ -200,7 +200,7 @@ func TestAddOrUpdateAdminNetworkPolicyStatus(t *testing.T) {
 	g.Expect(banp.Status.Conditions[0].Reason).To(gomega.Equal(policyNotReadyReason))
 	g.Expect(banp.Status.Conditions[0].Status).To(gomega.Equal(metav1.ConditionFalse))
 
-	err = controller.updateBANPStatusToReady(banp, controller.zone)
+	err = controller.updateBANPStatusToReady(banp.Name)
 	g.Expect(err).NotTo(gomega.HaveOccurred())
 	g.Eventually(func() int {
 		latestBANP, err := controller.banpLister.Get(banpName)
