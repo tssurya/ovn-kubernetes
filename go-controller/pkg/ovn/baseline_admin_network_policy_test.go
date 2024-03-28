@@ -230,10 +230,8 @@ var _ = ginkgo.Describe("OVN BANP Operations", func() {
 						Action: anpapi.BaselineAdminNetworkPolicyRuleActionDeny,
 						From: []anpapi.AdminNetworkPolicyIngressPeer{
 							{
-								Namespaces: &anpapi.NamespacedPeer{
-									NamespaceSelector: &metav1.LabelSelector{
-										MatchLabels: peerDenyLabel,
-									},
+								Namespaces: &metav1.LabelSelector{
+									MatchLabels: peerDenyLabel,
 								},
 							},
 						},
@@ -300,11 +298,9 @@ var _ = ginkgo.Describe("OVN BANP Operations", func() {
 						Action: anpapi.BaselineAdminNetworkPolicyRuleActionAllow,
 						From: []anpapi.AdminNetworkPolicyIngressPeer{
 							{
-								Pods: &anpapi.NamespacedPodPeer{ // test different kind of peer expression
-									Namespaces: anpapi.NamespacedPeer{
-										NamespaceSelector: &metav1.LabelSelector{
-											MatchLabels: peerAllowLabel,
-										},
+								Pods: &anpapi.NamespacedPod{ // test different kind of peer expression
+									NamespaceSelector: metav1.LabelSelector{
+										MatchLabels: peerAllowLabel,
 									},
 									PodSelector: metav1.LabelSelector{
 										MatchLabels: peerAllowLabel,
@@ -318,10 +314,8 @@ var _ = ginkgo.Describe("OVN BANP Operations", func() {
 						Action: anpapi.BaselineAdminNetworkPolicyRuleActionDeny,
 						From: []anpapi.AdminNetworkPolicyIngressPeer{
 							{
-								Namespaces: &anpapi.NamespacedPeer{
-									NamespaceSelector: &metav1.LabelSelector{
-										MatchLabels: peerPassLabel,
-									},
+								Namespaces: &metav1.LabelSelector{
+									MatchLabels: peerPassLabel,
 								},
 							},
 						},
@@ -380,10 +374,8 @@ var _ = ginkgo.Describe("OVN BANP Operations", func() {
 						Action: anpapi.BaselineAdminNetworkPolicyRuleActionDeny,
 						To: []anpapi.AdminNetworkPolicyEgressPeer{
 							{
-								Namespaces: &anpapi.NamespacedPeer{
-									NamespaceSelector: &metav1.LabelSelector{
-										MatchLabels: peerDenyLabel,
-									},
+								Namespaces: &metav1.LabelSelector{
+									MatchLabels: peerDenyLabel,
 								},
 							},
 						},
@@ -393,15 +385,13 @@ var _ = ginkgo.Describe("OVN BANP Operations", func() {
 						Action: anpapi.BaselineAdminNetworkPolicyRuleActionAllow,
 						To: []anpapi.AdminNetworkPolicyEgressPeer{
 							{
-								Pods: &anpapi.NamespacedPodPeer{ // test different kind of peer expression
-									Namespaces: anpapi.NamespacedPeer{
-										NamespaceSelector: &metav1.LabelSelector{
-											MatchExpressions: []metav1.LabelSelectorRequirement{
-												{
-													Key:      "house",
-													Operator: metav1.LabelSelectorOpIn,
-													Values:   []string{"slytherin", "hufflepuff"},
-												},
+								Pods: &anpapi.NamespacedPod{ // test different kind of peer expression
+									NamespaceSelector: metav1.LabelSelector{
+										MatchExpressions: []metav1.LabelSelectorRequirement{
+											{
+												Key:      "house",
+												Operator: metav1.LabelSelectorOpIn,
+												Values:   []string{"slytherin", "hufflepuff"},
 											},
 										},
 									},
@@ -417,10 +407,8 @@ var _ = ginkgo.Describe("OVN BANP Operations", func() {
 						Action: anpapi.BaselineAdminNetworkPolicyRuleActionDeny,
 						To: []anpapi.AdminNetworkPolicyEgressPeer{
 							{
-								Namespaces: &anpapi.NamespacedPeer{
-									NamespaceSelector: &metav1.LabelSelector{
-										MatchLabels: peerPassLabel,
-									},
+								Namespaces: &metav1.LabelSelector{
+									MatchLabels: peerPassLabel,
 								},
 							},
 						},
@@ -784,10 +772,8 @@ var _ = ginkgo.Describe("OVN BANP Operations", func() {
 							Action: anpapi.BaselineAdminNetworkPolicyRuleActionDeny,
 							From: []anpapi.AdminNetworkPolicyIngressPeer{
 								{
-									Namespaces: &anpapi.NamespacedPeer{
-										NamespaceSelector: &metav1.LabelSelector{
-											MatchLabels: peerDenyLabel,
-										},
+									Namespaces: &metav1.LabelSelector{
+										MatchLabels: peerDenyLabel,
 									},
 								},
 							},
@@ -799,10 +785,8 @@ var _ = ginkgo.Describe("OVN BANP Operations", func() {
 							Action: anpapi.BaselineAdminNetworkPolicyRuleActionAllow,
 							To: []anpapi.AdminNetworkPolicyEgressPeer{
 								{
-									Namespaces: &anpapi.NamespacedPeer{
-										NamespaceSelector: &metav1.LabelSelector{
-											MatchLabels: peerAllowLabel,
-										},
+									Namespaces: &metav1.LabelSelector{
+										MatchLabels: peerAllowLabel,
 									},
 								},
 							},
@@ -981,10 +965,8 @@ var _ = ginkgo.Describe("OVN BANP Operations", func() {
 						Action: anpapi.BaselineAdminNetworkPolicyRuleActionDeny,
 						To: []anpapi.AdminNetworkPolicyEgressPeer{
 							{
-								Namespaces: &anpapi.NamespacedPeer{
-									NamespaceSelector: &metav1.LabelSelector{
-										MatchLabels: peerDenyLabel,
-									},
+								Namespaces: &metav1.LabelSelector{
+									MatchLabels: peerDenyLabel,
 								},
 							},
 							{
@@ -1002,15 +984,13 @@ var _ = ginkgo.Describe("OVN BANP Operations", func() {
 						Action: anpapi.BaselineAdminNetworkPolicyRuleActionAllow,
 						To: []anpapi.AdminNetworkPolicyEgressPeer{
 							{
-								Pods: &anpapi.NamespacedPodPeer{ // test different kind of peer expression
-									Namespaces: anpapi.NamespacedPeer{
-										NamespaceSelector: &metav1.LabelSelector{
-											MatchExpressions: []metav1.LabelSelectorRequirement{
-												{
-													Key:      "house",
-													Operator: metav1.LabelSelectorOpIn,
-													Values:   []string{"slytherin", "hufflepuff"},
-												},
+								Pods: &anpapi.NamespacedPod{ // test different kind of peer expression
+									NamespaceSelector: metav1.LabelSelector{
+										MatchExpressions: []metav1.LabelSelectorRequirement{
+											{
+												Key:      "house",
+												Operator: metav1.LabelSelectorOpIn,
+												Values:   []string{"slytherin", "hufflepuff"},
 											},
 										},
 									},
