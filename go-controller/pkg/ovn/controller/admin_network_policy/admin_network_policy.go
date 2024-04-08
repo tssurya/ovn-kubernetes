@@ -17,6 +17,7 @@ import (
 	"github.com/pkg/errors"
 	v1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/labels"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/tools/cache"
@@ -118,6 +119,9 @@ func (c *Controller) ensureAdminNetworkPolicy(anp *anpapi.AdminNetworkPolicy) er
 	if err != nil {
 		return err
 	}
+	hasPriorityChanged := false 
+	// fetch the anpState from our cache if it exists
+	currentANPState, loaded := c.anpCache[anp.Name]
 	// If an ANP is created at the same priority as another one, let us trigger an event before
 	// applying it warning the user to verify there are no overlapping rules to rule out defined
 	// behaviour.
@@ -130,8 +134,7 @@ func (c *Controller) ensureAdminNetworkPolicy(anp *anpapi.AdminNetworkPolicy) er
 		}, v1.EventTypeWarning, ANPWithDuplicatePriorityEvent, "This ANP %s has a conflicting priority with ANP %s: %s;"+
 			"Please verify your rules are non-lapping between all policies at same priority to avoid undefined behavior", anp.Name, existingName)
 	}
-	// fetch the anpState from our cache if it exists
-	currentANPState, loaded := c.anpCache[anp.Name]
+	
 	// Based on the latest kapi ANP, namespace and pod objects:
 	// 1) Construct Port Group name using ANP name and ports of pods in ANP subject
 	// 2) Construct Address-sets with IPs of the peers in the rules
@@ -700,4 +703,19 @@ func (c *Controller) constructOpsForSubjectChanges(currentANPState, desiredANPSt
 		}
 	}
 	return ops, nil
+}
+
+// isDuplicateANP returns true if there is at least one other ANP in the cluster with
+// the same priority
+func (c *Controller) isDuplicateANP(anpName string, anpPriority int32) (bool, error) {
+	existingANPs, err := c.anpLister.List(labels.Everything())
+	if err != nil {
+		return false, err
+	}
+	for _, existingANP := range existingANPs {
+		if existingANP.Spec.Priority == anpPriority && existingANP.Name != anpName {
+			return true, nil
+		}
+	}
+	return false, nil
 }
