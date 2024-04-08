@@ -62,10 +62,12 @@ type Controller struct {
 
 	// anp name is key -> cloned value of ANP kapi is value
 	anpCache map[string]*adminNetworkPolicyState
-	// If more than one ANP is created at the same priority behaviour is undefined in k8s upsteam.
-	// If more than one ANP is created at the same priority OVNK will only create the first
-	// incoming ANP, rest of them will not be created.
-	// This map tracks anp.Spec.Priority->anp.Name
+	// If more than one ANP is created at the same priority behaviour is undefined in k8s upstream.
+	// See https://github.com/kubernetes-sigs/network-policy-api/issues/216 for more details.
+	// If more than one ANP is created at the same priority OVNK will create both of them but
+	// emit an event warning the user that they have multiple ANPs at same priority. Thus it is
+	// important for them to not have overlapping rules in those policies to avoid undefined behaviour.
+	// This map tracks anp.Spec.Priority->anp.Name which is used for emitting the event
 	anpPriorityMap map[int32]string
 
 	// banpCache contains the cloned value of BANP kapi
@@ -204,7 +206,6 @@ func NewController(
 		return nil, fmt.Errorf("could not add Event Handler for node Informer during admin network policy controller initialization, %w", err)
 	}
 
-	// TODO(tssurya): We don't use recorder now but will add events in future iterations
 	c.eventRecorder = recorder
 
 	return c, nil

@@ -2,14 +2,13 @@ package adminnetworkpolicy
 
 import (
 	"fmt"
-	"strings"
 	"time"
 
 	libovsdbclient "github.com/ovn-org/libovsdb/client"
 	libovsdbops "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/libovsdb/ops"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/nbdb"
 	"github.com/pkg/errors"
-	"k8s.io/apimachinery/pkg/api/meta"
+	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/klog/v2"
 	anpapi "sigs.k8s.io/network-policy-api/apis/v1alpha1"
@@ -40,15 +39,24 @@ func (c *Controller) repairAdminNetworkPolicies() error {
 		// let's populate the anpPriorityMap cache and add the correct ANP at the right priority
 		if anp.Spec.Priority > ovnkSupportedPriorityUpperBound {
 			// we don't want to add this ANP to the cache since we don't support this priority range
+			// emit event
+			c.eventRecorder.Eventf(&v1.ObjectReference{
+				Kind: "AdminNetworkPolicy",
+				Name: anp.Name,
+			}, v1.EventTypeWarning, ANPWithUnsupportedPriorityEvent, "This ANP %s has an unsupported priority %d;"+
+				"Please update the priority to a value between 0(highest priority) and 99(lowest priority)", anp.Name, anp.Spec.Priority)
 			continue
 		}
-		status := meta.FindStatusCondition(anp.Status.Conditions, policyReadyStatusType+c.zone)
-		if status != nil && strings.Contains(status.Message, ErrorANPWithDuplicatePriority.Error()) {
-			// we don't want to add this ANP to the priority cache because this ANP's setup was never done
-			continue
+		if existingName, ok := c.anpPriorityMap[anp.Spec.Priority]; ok {
+			c.eventRecorder.Eventf(&v1.ObjectReference{
+				Kind: "AdminNetworkPolicy",
+				Name: anp.Name,
+			}, v1.EventTypeWarning, ANPWithDuplicatePriorityEvent, "This ANP %s has a conflicting priority with ANP %s: %s;"+
+				"Please verify your rules are non-lapping between all policies at same priority to avoid undefined behavior", anp.Name, existingName)
+		} else {
+			klog.Infof("Adding ANP %s at priority %d/%d to the anpPriority cache", anp.Name, anp.Spec.Priority, anp.Spec.Priority)
+			c.anpPriorityMap[anp.Spec.Priority] = anp.Name
 		}
-		klog.Infof("Adding ANP %s at priority %d/%d to the anpPriority cache", anp.Name, anp.Spec.Priority, anp.Spec.Priority)
-		c.anpPriorityMap[anp.Spec.Priority] = anp.Name
 	}
 
 	// Deal with PortGroup Repairs first - this will auto cleanup ACLs so no need to specifically delete ACLs
