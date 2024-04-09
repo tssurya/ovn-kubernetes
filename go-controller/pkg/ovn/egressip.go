@@ -1517,7 +1517,7 @@ func (e *egressIPZoneController) addPodEgressIPAssignment(egressIPName string, s
 		}
 		if config.OVNKubernetesFeature.EnableInterconnect && !isOVNNetwork && (loadedPodNode && !isLocalZonePod) {
 			// configure reroute for non-local-zone pods on egress nodes
-			ops, err = e.createReroutePolicyOps(ops, podIPs, status, egressIPName, nextHopIP)
+			ops, err = e.createReroutePolicyOps(ops, podIPs, status, egressIPName, nextHopIP, false)
 			if err != nil {
 				return fmt.Errorf("unable to create logical router policy ops %v, err: %v", status, err)
 			}
@@ -1527,7 +1527,7 @@ func (e *egressIPZoneController) addPodEgressIPAssignment(egressIPName string, s
 	// exec when node is local OR when pods are local
 	// don't add a reroute policy if the egress node towards which we are adding this doesn't exist
 	if loadedEgressNode && loadedPodNode && isLocalZonePod {
-		ops, err = e.createReroutePolicyOps(ops, podIPs, status, egressIPName, nextHopIP)
+		ops, err = e.createReroutePolicyOps(ops, podIPs, status, egressIPName, nextHopIP, true)
 		if err != nil {
 			return fmt.Errorf("unable to create logical router policy ops, err: %v", err)
 		}
@@ -1585,7 +1585,7 @@ func (e *egressIPZoneController) deletePodEgressIPAssignment(egressIPName string
 		if err != nil {
 			return err
 		}
-		ops, err = e.deleteReroutePolicyOps(ops, podIPs, status, egressIPName, nextHopIP)
+		ops, err = e.deleteReroutePolicyOps(ops, podIPs, status, egressIPName, nextHopIP, true)
 		if errors.Is(err, libovsdbclient.ErrNotFound) {
 			// if the gateway router join IP setup is already gone, then don't count it as error.
 			klog.Warningf("Unable to delete logical router policy, err: %v", err)
@@ -1597,7 +1597,7 @@ func (e *egressIPZoneController) deletePodEgressIPAssignment(egressIPName string
 	if loadedEgressNode && isLocalZoneEgressNode {
 		if config.OVNKubernetesFeature.EnableInterconnect && !isOVNNetwork && (!loadedPodNode || !isLocalZonePod) { // node is deleted (we can't determine zone so we always try and nuke OR pod is remote to zone)
 			// delete reroute for non-local-zone pods on egress nodes
-			ops, err = e.deleteReroutePolicyOps(ops, podIPs, status, egressIPName, nextHopIP)
+			ops, err = e.deleteReroutePolicyOps(ops, podIPs, status, egressIPName, nextHopIP, false)
 			if err != nil {
 				return fmt.Errorf("unable to delete logical router static route ops %v, err: %v", status, err)
 			}
@@ -1804,7 +1804,9 @@ func (e *egressIPZoneController) getNextHop(egressNodeName, egressIP, egressIPNa
 // to redirect the pods to the appropriate management port or if interconnect is
 // enabled, the appropriate transit switch port.
 // This function should be called with lock on nodeZoneState cache key status.Node
-func (e *egressIPZoneController) createReroutePolicyOps(ops []ovsdb.Operation, podIPNets []*net.IPNet, status egressipv1.EgressIPStatusItem, egressIPName, nextHopIP string) ([]ovsdb.Operation, error) {
+// - mark bool is set if the LRP is for a local zone pod and unset if its for a remote zone pod
+func (e *egressIPZoneController) createReroutePolicyOps(ops []ovsdb.Operation, podIPNets []*net.IPNet,
+	status egressipv1.EgressIPStatusItem, egressIPName, nextHopIP string, mark bool) ([]ovsdb.Operation, error) {
 	isEgressIPv6 := utilnet.IsIPv6String(status.EgressIP)
 	var err error
 	// Handle all pod IPs that match the egress IP address family
@@ -1817,6 +1819,9 @@ func (e *egressIPZoneController) createReroutePolicyOps(ops []ovsdb.Operation, p
 			ExternalIDs: map[string]string{
 				"name": egressIPName,
 			},
+		}
+		if mark {
+			lrp.Match = fmt.Sprintf("pkt.mark == %d && %s.src == %s", types.EgressIPServiceConnectionMark, ipFamilyName(isEgressIPv6), podIPNet.IP.String())
 		}
 		p := func(item *nbdb.LogicalRouterPolicy) bool {
 			return item.Match == lrp.Match && item.Priority == lrp.Priority && item.ExternalIDs["name"] == lrp.ExternalIDs["name"]
@@ -1840,12 +1845,17 @@ func (e *egressIPZoneController) createReroutePolicyOps(ops []ovsdb.Operation, p
 // if caller fails to find a next hop, we clear the LRPs for that specific Egress IP
 // which will break HA momentarily
 // This function should be called with lock on nodeZoneState cache key status.Node
-func (e *egressIPZoneController) deleteReroutePolicyOps(ops []ovsdb.Operation, podIPNets []*net.IPNet, status egressipv1.EgressIPStatusItem, egressIPName, nextHopIP string) ([]ovsdb.Operation, error) {
+// - mark bool is set if the LRP is for a local zone pod and unset if its for a remote zone pod
+func (e *egressIPZoneController) deleteReroutePolicyOps(ops []ovsdb.Operation, podIPNets []*net.IPNet,
+	status egressipv1.EgressIPStatusItem, egressIPName, nextHopIP string, mark bool) ([]ovsdb.Operation, error) {
 	isEgressIPv6 := utilnet.IsIPv6String(status.EgressIP)
 	var err error
 	// Handle all pod IPs that match the egress IP address family
 	for _, podIPNet := range util.MatchAllIPNetFamily(isEgressIPv6, podIPNets) {
 		filterOption := fmt.Sprintf("%s.src == %s", ipFamilyName(isEgressIPv6), podIPNet.IP.String())
+		if mark {
+			filterOption = fmt.Sprintf("pkt.mark == %d && %s.src == %s", types.EgressIPServiceConnectionMark, ipFamilyName(isEgressIPv6), podIPNet.IP.String())
+		}
 		p := func(item *nbdb.LogicalRouterPolicy) bool {
 			return item.Match == filterOption && item.Priority == types.EgressIPReroutePriority && item.ExternalIDs["name"] == egressIPName
 		}
