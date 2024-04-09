@@ -7,6 +7,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/klog/v2"
 	anpapiapply "sigs.k8s.io/network-policy-api/pkg/client/applyconfiguration/apis/v1alpha1"
 )
@@ -49,6 +50,12 @@ const (
 // updateANPStatusToReady updates the status of the policy to reflect that it is ready
 // Each zone's ovnkube-controller will call this, hence let's update status using server-side-apply
 func (c *Controller) updateANPStatusToReady(anpName string) error {
+	c.isSelfDeletedLock.RLock()
+	if c.isSelfDeleted { // nothing to do, don't re-create or touch statuses
+		c.isSelfDeletedLock.RUnlock()
+		return nil
+	}
+	c.isSelfDeletedLock.RUnlock()
 	readyCondition := metav1.Condition{
 		Type:    policyReadyStatusType + c.zone,
 		Status:  metav1.ConditionTrue,
@@ -70,6 +77,12 @@ func (c *Controller) updateANPStatusToReady(anpName string) error {
 // to this function. Message is particularly useful as it can tell which zone's setup has not finished for
 // this ANP instead of having to manually check logs across zones
 func (c *Controller) updateANPStatusToNotReady(anpName, message string) error {
+	c.isSelfDeletedLock.RLock()
+	if c.isSelfDeleted { // nothing to do, don't re-create or touch statuses
+		c.isSelfDeletedLock.RUnlock()
+		return nil
+	}
+	c.isSelfDeletedLock.RUnlock()
 	if len(message) >= 32767 { // max length of message can be 32768
 		message = message[:32766]
 	}
@@ -95,6 +108,7 @@ func (c *Controller) updateANPZoneStatusCondition(newCondition metav1.Condition,
 	}
 	existingCondition := meta.FindStatusCondition(anp.Status.Conditions, newCondition.Type)
 	if existingCondition == nil {
+		klog.Infof("SURYA %v/%s", newCondition, anpName)
 		newCondition.LastTransitionTime = metav1.NewTime(time.Now())
 	} else {
 		if existingCondition.Status != newCondition.Status {
@@ -173,4 +187,32 @@ func (c *Controller) updateBANPZoneStatusCondition(newCondition metav1.Condition
 	_, err = c.anpClientSet.PolicyV1alpha1().BaselineAdminNetworkPolicies().
 		ApplyStatus(context.TODO(), applyObj, metav1.ApplyOptions{FieldManager: c.zone, Force: true})
 	return err
+}
+
+func (c *Controller) removeZoneStatusFromANPs() error {
+	c.Lock()
+	defer c.Unlock()
+	existingANPs, err := c.anpLister.List(labels.Everything())
+	if err != nil {
+		return err
+	}
+	for _, existingANP := range existingANPs {
+		klog.Infof("SURYA %v", existingANP.Status)
+		/*existingCondition := meta.FindStatusCondition(existingANP.Status.Conditions, policyReadyStatusType+c.zone)
+		if existingCondition == nil {
+			continue
+		} else {
+			existingCondition.Reset()
+		}*/
+		applyObj := anpapiapply.AdminNetworkPolicy(existingANP.Name).
+			WithStatus(anpapiapply.AdminNetworkPolicyStatus())
+		klog.Infof("SURYA %v", applyObj.Status.Conditions)
+		result, err := c.anpClientSet.PolicyV1alpha1().AdminNetworkPolicies().
+			ApplyStatus(context.TODO(), applyObj, metav1.ApplyOptions{FieldManager: c.zone, Force: true})
+		klog.Infof("SURYA %v/%v", result, err)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }

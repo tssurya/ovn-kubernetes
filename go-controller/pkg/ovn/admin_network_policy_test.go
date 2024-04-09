@@ -28,6 +28,7 @@ import (
 	"k8s.io/klog/v2"
 	utilpointer "k8s.io/utils/pointer"
 	anpapi "sigs.k8s.io/network-policy-api/apis/v1alpha1"
+	anpapiapply "sigs.k8s.io/network-policy-api/pkg/client/applyconfiguration/apis/v1alpha1"
 	anpfake "sigs.k8s.io/network-policy-api/pkg/client/clientset/versioned/fake"
 )
 
@@ -1094,6 +1095,111 @@ var _ = ginkgo.Describe("OVN ANP Operations", func() {
 				gomega.Expect(anp.Status.Conditions[0].Type).To(gomega.Equal("Ready-In-Zone-global"))
 				gomega.Expect(anp.Status.Conditions[0].Reason).To(gomega.Equal("SetupFailed"))
 				gomega.Expect(anp.Status.Conditions[0].Status).To(gomega.Equal(metav1.ConditionFalse))
+				return nil
+			}
+			err := app.Run([]string{app.Name})
+			gomega.Expect(err).ToNot(gomega.HaveOccurred())
+		})
+		ginkgo.It("should clear zone statuses from ANPs upon node delete", func() {
+			app.Action = func(ctx *cli.Context) error {
+				config.IPv4Mode = true
+				config.IPv6Mode = true
+				node1 := nodeFor(node1Name, node1IPv4, node1IPv6, node1IPv4Subnet, node1IPv6Subnet, node1transitIPv4, node1transitIPv6)
+				node2 := nodeFor(node2Name, node2IPv4, node2IPv6, node2IPv4Subnet, node2IPv6Subnet, node2transitIPv4, node2transitIPv6)
+				dbSetup := libovsdbtest.TestSetup{
+					NBData: []libovsdbtest.TestData{},
+				}
+				fakeOVN.startWithDBSetup(dbSetup,
+					&v1.NodeList{
+						Items: []v1.Node{
+							*node1,
+							*node2,
+						},
+					},
+				)
+				fakeOVN.controller.zone = node1Name // ensure we set the controller's zone as the node1's zone
+				fakeOVN.InitAndRunANPController()
+				ginkgo.By("1. Create ANP with 1 status managed by zone node1")
+				anpSubject := newANPSubjectObject(
+					&metav1.LabelSelector{
+						MatchLabels: anpLabel,
+					},
+					nil,
+				)
+				anp := newANPObject("harry-potter", 5, anpSubject, []anpapi.AdminNetworkPolicyIngressRule{}, []anpapi.AdminNetworkPolicyEgressRule{})
+				anp.ResourceVersion = "1"
+				anp.ManagedFields = []metav1.ManagedFieldsEntry{
+					{
+						Manager: "node1",
+						Operation: metav1.ManagedFieldsOperationApply,
+						APIVersion: "policy.networking.k8s.io/v1alpha1",
+						FieldsType: "FieldsV1",
+						FieldsV1: &metav1.FieldsV1{Raw: []byte(`{"f:status":{"f:conditions":{"k:{\"type\":\"Ready-In-Zone-node1\"}":{".":{},"f:lastTransitionTime":{},"f:message":{},"f:reason":{},"f:status":{},"f:type":{}}}}}`)},
+						Subresource: "status",
+					},
+					{
+						Manager: "node2",
+						Operation: metav1.ManagedFieldsOperationApply,
+						APIVersion: "policy.networking.k8s.io/v1alpha1",
+						FieldsType: "FieldsV1",
+						FieldsV1: &metav1.FieldsV1{Raw: []byte(`{"f:status":{"f:conditions":{"k:{\"type\":\"Ready-In-Zone-node2\"}":{".":{},"f:lastTransitionTime":{},"f:message":{},"f:reason":{},"f:status":{},"f:type":{}}}}}`)},
+						Subresource: "status",
+					},
+				}
+				anp, err := fakeOVN.fakeClient.ANPClient.PolicyV1alpha1().AdminNetworkPolicies().Create(context.TODO(), anp, metav1.CreateOptions{})
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+				gomega.Eventually(func() int {
+					anp, err = fakeOVN.fakeClient.ANPClient.PolicyV1alpha1().AdminNetworkPolicies().Get(context.TODO(), "harry-potter", metav1.GetOptions{})
+					gomega.Expect(err).NotTo(gomega.HaveOccurred())
+					return len(anp.Status.Conditions)
+				}).Should(gomega.Equal(1))
+				klog.Infof("SURYA %v", anp.GetManagedFields())
+				gomega.Expect(anp.Status.Conditions[0].Type).To(gomega.Equal("Ready-In-Zone-"+node1Name))
+				gomega.Expect(anp.Status.Conditions[0].Message).To(gomega.Equal("Setting up OVN DB plumbing was successful"))
+				gomega.Expect(anp.Status.Conditions[0].Reason).To(gomega.Equal("SetupSucceeded"))
+				gomega.Expect(anp.Status.Conditions[0].Status).To(gomega.Equal(metav1.ConditionTrue))
+
+				// Simulate zone (node2) adding a status to this ANP using server side apply
+				// This is because in UT we cannot simulate multi-zones
+				ginkgo.By("2. Update ANP status to also include status from node2 (simulation)")
+				readyCondition := metav1.Condition{
+					Type:    "Ready-In-Zone-node2",
+					Status:  metav1.ConditionTrue,
+					Reason:  "SetupSucceeded",
+					Message: "Setting up OVN DB plumbing was successful",
+				}
+				applyObj := anpapiapply.AdminNetworkPolicy(anp.Name).
+					WithStatus(anpapiapply.AdminNetworkPolicyStatus().WithConditions(readyCondition))
+				_, err = fakeOVN.fakeClient.ANPClient.PolicyV1alpha1().AdminNetworkPolicies().
+					ApplyStatus(context.TODO(), applyObj, metav1.ApplyOptions{FieldManager: node2Name, Force: true})
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+				klog.Infof("SURYA %v", anp)
+				gomega.Eventually(func() int {
+					anp, err = fakeOVN.fakeClient.ANPClient.PolicyV1alpha1().AdminNetworkPolicies().Get(context.TODO(), "harry-potter", metav1.GetOptions{})
+					gomega.Expect(err).NotTo(gomega.HaveOccurred())
+					return len(anp.Status.Conditions)
+				}).Should(gomega.Equal(2))
+				klog.Infof("SURYA %v", anp)
+				gomega.Expect(anp.Status.Conditions[0].Type).To(gomega.BeElementOf("Ready-In-Zone-"+node1Name, "Ready-In-Zone-"+node2Name))
+				gomega.Expect(anp.Status.Conditions[1].Type).To(gomega.BeElementOf("Ready-In-Zone-"+node1Name, "Ready-In-Zone-"+node2Name))
+
+				/*ginkgo.By("3. Delete node1 and ensure the status get's updated correctly")
+				err = fakeOVN.fakeClient.KubeClient.CoreV1().Nodes().Delete(context.TODO(), node1Name, metav1.DeleteOptions{})
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+				applyObj = anpapiapply.AdminNetworkPolicy(anp.Name).
+					WithStatus(anpapiapply.AdminNetworkPolicyStatus().WithConditions(metav1.Condition{}))
+				_, err = fakeOVN.fakeClient.ANPClient.PolicyV1alpha1().AdminNetworkPolicies().
+					ApplyStatus(context.TODO(), applyObj, metav1.ApplyOptions{FieldManager: node2Name, Force: true})
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+				klog.Infof("SURYA %v", anp)
+
+				gomega.Eventually(func() int {
+					anp, err = fakeOVN.fakeClient.ANPClient.PolicyV1alpha1().AdminNetworkPolicies().Get(context.TODO(), "harry-potter", metav1.GetOptions{})
+					gomega.Expect(err).NotTo(gomega.HaveOccurred())
+					return len(anp.Status.Conditions)
+				}).Should(gomega.Equal(1))
+				klog.Infof("SURYA %v", anp.Status.Conditions)
+				gomega.Expect(anp.Status.Conditions[0].Type).To(gomega.BeElementOf("Ready-In-Zone-"+node2Name))*/
 				return nil
 			}
 			err := app.Run([]string{app.Name})

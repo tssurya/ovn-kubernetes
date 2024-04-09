@@ -27,6 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/klog/v2"
 )
 
 func NewRootGetAction(resource schema.GroupVersionResource, name string) GetActionImpl {
@@ -184,7 +185,7 @@ func NewRootPatchSubresourceAction(resource schema.GroupVersionResource, name st
 	action.Name = name
 	action.PatchType = pt
 	action.Patch = patch
-
+	klog.Infof("SURYA %v", action)
 	return action
 }
 

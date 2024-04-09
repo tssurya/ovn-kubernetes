@@ -7,8 +7,10 @@ import (
 	"time"
 
 	libovsdbclient "github.com/ovn-org/libovsdb/client"
+	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/factory"
 	addressset "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/ovn/address_set"
+	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -59,6 +61,9 @@ type Controller struct {
 	isPodScheduledinLocalZone func(*v1.Pod) bool
 	// store's the name of the zone that this controller belongs to
 	zone string
+	// Am I deleted? UH..OH..I should cleanup my zone status from all ANPs and stop touching statuses
+	isSelfDeleted bool
+	isSelfDeletedLock sync.RWMutex
 
 	// anp name is key -> cloned value of ANP kapi is value
 	anpCache map[string]*adminNetworkPolicyState
@@ -582,5 +587,19 @@ func (c *Controller) onANPNodeDelete(obj interface{}) {
 		return
 	}
 	klog.V(5).Infof("Deleting Node Admin Network Policy %s", key)
-	c.anpNodeQueue.Add(key)
+	// if IC is enabled and this node where the controllers, DBs are running is getting deleted,
+	// its a zone delete event where DB will get blown away anyways so nothing to cleanup except
+	// updating zone status of all ANPs in the cluster
+	if config.OVNKubernetesFeature.EnableInterconnect && c.zone != types.OvnDefaultZone && c.zone == key {
+		klog.Infof("This is a local node delete event for node %s, cleaning up status from ANPs for this zone", key)
+		// local node delete event, clear statuses, don't bothering cleaning up local DBs
+		c.isSelfDeletedLock.Lock()
+		c.isSelfDeleted = true
+		c.isSelfDeletedLock.Unlock()
+		_ = c.removeZoneStatusFromANPs() // best effort
+	} else {
+		klog.V(3).Infof("This is a remote node delete event for node %s, cleaning up peers from ANPs for this zone", key)
+		// remote node delete event, need to update peers
+		c.anpNodeQueue.Add(key)
+	}
 }

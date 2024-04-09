@@ -22,6 +22,7 @@ import (
 	"context"
 	json "encoding/json"
 	"fmt"
+	"k8s.io/klog/v2"
 
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	labels "k8s.io/apimachinery/pkg/labels"
@@ -165,6 +166,7 @@ func (c *FakeAdminNetworkPolicies) ApplyStatus(ctx context.Context, adminNetwork
 	if err != nil {
 		return nil, err
 	}
+	klog.Infof("SURYA %v", data)
 	name := adminNetworkPolicy.Name
 	if name == nil {
 		return nil, fmt.Errorf("adminNetworkPolicy.Name must be provided to Apply")
