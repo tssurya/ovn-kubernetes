@@ -7,6 +7,7 @@ const (
 	acl
 	dhcpOptions
 	portGroup
+	logicalRouterPolicy
 )
 
 const (
@@ -280,4 +281,14 @@ var PortGroupCluster = newObjectIDsType(portGroup, ClusterOwnerType, []ExternalI
 	// name of a global port group
 	// currently ClusterPortGroup and ClusterRtrPortGroup are present
 	ObjectNameKey,
+})
+
+var LogicalRouterPolicyEgressIP = newObjectIDsType(logicalRouterPolicy, EgressIPOwnerType, []ExternalIDKey{
+	// the priority of the LRP
+	PriorityKey,
+	// for the reroute policies it should be the "EIPName_Namespace/podName"
+	// for the global policies it should be the unique global name
+	ObjectNameKey,
+	// the IP Family for this policy, v4 or v6 or dualstack
+	IPFamilyKey,
 })

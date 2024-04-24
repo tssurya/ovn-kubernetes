@@ -54,6 +54,17 @@ func getEgressIPAddrSetDbIDs(name egressIpAddrSetName, controller string) *libov
 	})
 }
 
+func getEgressIPLRPReRouteDbIDs(priority int, eipName, namespace, podName, controller, ipFamily string) *libovsdbops.DbObjectIDs {
+	return libovsdbops.NewDbObjectIDs(libovsdbops.LogicalRouterPolicyEgressIP, controller, map[libovsdbops.ExternalIDKey]string{
+		// egress ip creates per pod reroute policies at 100 priority
+		// NOTE: "_" and "/" are invalid characters for metadata names so a given eipName, namespace, podName
+		// cannot have these and thus our logic holds for splitting
+		libovsdbops.ObjectNameKey: eipName + "_" + namespace + "/" + podName,
+		libovsdbops.PriorityKey:   fmt.Sprintf("%d", priority),
+		libovsdbops.IPFamilyKey:   ipFamily,
+	})
+}
+
 // main reconcile functions begin here
 
 // reconcileEgressIP reconciles the database configuration
@@ -899,12 +910,24 @@ func (oc *DefaultNetworkController) syncStaleAddressSetIPs(egressIPCache map[str
 // This corner case  of same pod matching more than one object will not work for IC deployments
 // since internal cache based logic will be different for different ovnkube-controllers
 // zone can think objA is active while zoneb can think objB is active if both have multiple choice options
+// based on ordering of events. If the database is intact we will have consistency, it is in the cases like
+// new node add where database is created from scratch or new cluster install with EIP CRDs pre-created
+// that we will have problems.
 func (oc *DefaultNetworkController) syncPodAssignmentCache(egressIPCache map[string]egressIPCacheEntry) error {
 	oc.eIPC.podAssignmentMutex.Lock()
 	defer oc.eIPC.podAssignmentMutex.Unlock()
 	for egressIPName, state := range egressIPCache {
 		p1 := func(item *nbdb.LogicalRouterPolicy) bool {
-			return item.Priority == types.EgressIPReroutePriority && item.ExternalIDs["name"] == egressIPName
+			if item.Priority != types.EgressIPReroutePriority {
+				return false
+			}
+			// pattern is eipName_Namespace/podName
+			owner := strings.Split(item.ExternalIDs[libovsdbops.ObjectNameKey.String()], "_")
+			if len(owner) != 2 {
+				return false
+			}
+			eipName := owner[0]
+			return eipName == egressIPName
 		}
 		reRoutePolicies, err := libovsdbops.FindLogicalRouterPoliciesWithPredicate(oc.nbClient, p1)
 		if err != nil {
@@ -973,15 +996,28 @@ func (oc *DefaultNetworkController) syncPodAssignmentCache(egressIPCache map[str
 // It also removes stale nexthops from router policies used by EgressIPs.
 // Upon failure, it may be invoked multiple times in order to avoid a pod restart.
 func (oc *DefaultNetworkController) syncStaleEgressReroutePolicy(egressIPCache map[string]egressIPCacheEntry) error {
-	logicalRouterPolicyStaleNexthops := []*nbdb.LogicalRouterPolicy{}
+	// We have added new dbobject LogicalRouterPolicyEgressIP for the 100 re route pod policies,
+	// let us delete the stale LRPs without the new externalIDs so that createReroutePolicyOps correctly
+	// recreates these; once we start cutting releases, we can remove this code from newer versions where we
+	// are sure we have already cleaned them up
 	p := func(item *nbdb.LogicalRouterPolicy) bool {
+		_, ok := item.ExternalIDs[libovsdbops.PriorityKey.String()]
+		return item.Priority == types.EgressIPReroutePriority && !ok
+	}
+	if err := libovsdbops.DeleteLogicalRouterPoliciesWithPredicate(oc.nbClient, types.OVNClusterRouter, p); err != nil {
+		return fmt.Errorf("error deleting old logical router policies from router without required externalIDs %s: %v", types.OVNClusterRouter, err)
+	}
+	logicalRouterPolicyStaleNexthops := []*nbdb.LogicalRouterPolicy{}
+	p = func(item *nbdb.LogicalRouterPolicy) bool {
 		if item.Priority != types.EgressIPReroutePriority {
 			return false
 		}
-		egressIPName := item.ExternalIDs["name"]
+		owner := item.ExternalIDs[libovsdbops.ObjectNameKey.String()] // eipName + "_" + namespace + "/" + podName
+		splitMatch := strings.Split(owner, "_")
+		egressIPName := splitMatch[0]
 		cacheEntry, exists := egressIPCache[egressIPName]
 		// sample match: "pkt.mark == %d && %s.src == %s" OR "%s.src == %s" so secondlast index is podIP still
-		splitMatch := strings.Split(item.Match, " ")
+		splitMatch = strings.Split(item.Match, " ")
 		logicalIP := splitMatch[len(splitMatch)-1]
 		parsedLogicalIP := net.ParseIP(logicalIP)
 		egressPodIPs := sets.NewString()
@@ -1029,7 +1065,6 @@ func (oc *DefaultNetworkController) syncStaleEgressReroutePolicy(egressIPCache m
 	if err != nil {
 		return fmt.Errorf("unable to remove stale next hops from logical router policies: %v", err)
 	}
-
 	return nil
 }
 
@@ -1535,7 +1570,7 @@ func (e *egressIPZoneController) addPodEgressIPAssignment(egressIPName string, s
 		}
 		if config.OVNKubernetesFeature.EnableInterconnect && !isOVNNetwork && (loadedPodNode && !isLocalZonePod) {
 			// configure reroute for non-local-zone pods on egress nodes
-			ops, err = e.createReroutePolicyOps(ops, podIPs, status, egressIPName, nextHopIP, false)
+			ops, err = e.createReroutePolicyOps(ops, pod, podIPs, status, egressIPName, nextHopIP, false)
 			if err != nil {
 				return fmt.Errorf("unable to create logical router policy ops %v, err: %v", status, err)
 			}
@@ -1545,7 +1580,7 @@ func (e *egressIPZoneController) addPodEgressIPAssignment(egressIPName string, s
 	// exec when node is local OR when pods are local
 	// don't add a reroute policy if the egress node towards which we are adding this doesn't exist
 	if loadedEgressNode && loadedPodNode && isLocalZonePod {
-		ops, err = e.createReroutePolicyOps(ops, podIPs, status, egressIPName, nextHopIP, true)
+		ops, err = e.createReroutePolicyOps(ops, pod, podIPs, status, egressIPName, nextHopIP, true)
 		if err != nil {
 			return fmt.Errorf("unable to create logical router policy ops, err: %v", err)
 		}
@@ -1603,7 +1638,7 @@ func (e *egressIPZoneController) deletePodEgressIPAssignment(egressIPName string
 		if err != nil {
 			return err
 		}
-		ops, err = e.deleteReroutePolicyOps(ops, podIPs, status, egressIPName, nextHopIP, true)
+		ops, err = e.deleteReroutePolicyOps(ops, pod, status, egressIPName, nextHopIP)
 		if errors.Is(err, libovsdbclient.ErrNotFound) {
 			// if the gateway router join IP setup is already gone, then don't count it as error.
 			klog.Warningf("Unable to delete logical router policy, err: %v", err)
@@ -1615,7 +1650,7 @@ func (e *egressIPZoneController) deletePodEgressIPAssignment(egressIPName string
 	if loadedEgressNode && isLocalZoneEgressNode {
 		if config.OVNKubernetesFeature.EnableInterconnect && !isOVNNetwork && (!loadedPodNode || !isLocalZonePod) { // node is deleted (we can't determine zone so we always try and nuke OR pod is remote to zone)
 			// delete reroute for non-local-zone pods on egress nodes
-			ops, err = e.deleteReroutePolicyOps(ops, podIPs, status, egressIPName, nextHopIP, false)
+			ops, err = e.deleteReroutePolicyOps(ops, pod, status, egressIPName, nextHopIP)
 			if err != nil {
 				return fmt.Errorf("unable to delete logical router static route ops %v, err: %v", status, err)
 			}
@@ -1823,7 +1858,7 @@ func (e *egressIPZoneController) getNextHop(egressNodeName, egressIP, egressIPNa
 // enabled, the appropriate transit switch port.
 // This function should be called with lock on nodeZoneState cache key status.Node
 // - mark bool is set if the LRP is for a local zone pod and unset if its for a remote zone pod
-func (e *egressIPZoneController) createReroutePolicyOps(ops []ovsdb.Operation, podIPNets []*net.IPNet,
+func (e *egressIPZoneController) createReroutePolicyOps(ops []ovsdb.Operation, pod *v1.Pod, podIPNets []*net.IPNet,
 	status egressipv1.EgressIPStatusItem, egressIPName, nextHopIP string, mark bool) ([]ovsdb.Operation, error) {
 	isEgressIPv6 := utilnet.IsIPv6String(status.EgressIP)
 	var err error
@@ -1834,15 +1869,32 @@ func (e *egressIPZoneController) createReroutePolicyOps(ops []ovsdb.Operation, p
 			Priority: types.EgressIPReroutePriority,
 			Nexthops: []string{nextHopIP},
 			Action:   nbdb.LogicalRouterPolicyActionReroute,
-			ExternalIDs: map[string]string{
-				"name": egressIPName,
-			},
 		}
 		if mark {
 			lrp.Match = fmt.Sprintf("pkt.mark == %d && %s.src == %s", types.EgressIPServiceConnectionMark, ipFamilyName(isEgressIPv6), podIPNet.IP.String())
 		}
+		dbIDs := getEgressIPLRPReRouteDbIDs(types.EgressIPReroutePriority, egressIPName, pod.Namespace,
+			pod.Name, DefaultNetworkControllerName, ipFamilyName(isEgressIPv6))
+		lrp.ExternalIDs = dbIDs.GetExternalIDs()
 		p := func(item *nbdb.LogicalRouterPolicy) bool {
-			return item.Match == lrp.Match && item.Priority == lrp.Priority && item.ExternalIDs["name"] == lrp.ExternalIDs["name"]
+			if item.Priority != types.EgressIPReroutePriority {
+				return false
+			}
+			// pattern is eipName_Namespace/podName
+			owner := strings.Split(item.ExternalIDs[libovsdbops.ObjectNameKey.String()], "_")
+			if len(owner) != 2 {
+				return false
+			}
+			eipName := owner[0]
+			owner = strings.Split(owner[1], "/")
+			if len(owner) != 2 {
+				return false
+			}
+			namespace := owner[0]
+			podName := owner[1]
+			// The owner key for this LRP will be containing the name of EIP, podNamespace, podName that owns it
+			return eipName == egressIPName && namespace == pod.Namespace && podName == pod.Name &&
+				item.ExternalIDs[libovsdbops.IPFamilyKey.String()] == ipFamilyName(isEgressIPv6)
 		}
 
 		ops, err = libovsdbops.CreateOrAddNextHopsToLogicalRouterPolicyWithPredicateOps(e.nbClient, ops, types.OVNClusterRouter, &lrp, p)
@@ -1864,34 +1916,45 @@ func (e *egressIPZoneController) createReroutePolicyOps(ops []ovsdb.Operation, p
 // which will break HA momentarily
 // This function should be called with lock on nodeZoneState cache key status.Node
 // - mark bool is set if the LRP is for a local zone pod and unset if its for a remote zone pod
-func (e *egressIPZoneController) deleteReroutePolicyOps(ops []ovsdb.Operation, podIPNets []*net.IPNet,
-	status egressipv1.EgressIPStatusItem, egressIPName, nextHopIP string, mark bool) ([]ovsdb.Operation, error) {
+func (e *egressIPZoneController) deleteReroutePolicyOps(ops []ovsdb.Operation, pod *v1.Pod,
+	status egressipv1.EgressIPStatusItem, egressIPName, nextHopIP string) ([]ovsdb.Operation, error) {
 	isEgressIPv6 := utilnet.IsIPv6String(status.EgressIP)
 	var err error
 	// Handle all pod IPs that match the egress IP address family
-	for _, podIPNet := range util.MatchAllIPNetFamily(isEgressIPv6, podIPNets) {
-		filterOption := fmt.Sprintf("%s.src == %s", ipFamilyName(isEgressIPv6), podIPNet.IP.String())
-		if mark {
-			filterOption = fmt.Sprintf("pkt.mark == %d && %s.src == %s", types.EgressIPServiceConnectionMark, ipFamilyName(isEgressIPv6), podIPNet.IP.String())
+	p := func(item *nbdb.LogicalRouterPolicy) bool {
+		if item.Priority != types.EgressIPReroutePriority {
+			return false
 		}
-		p := func(item *nbdb.LogicalRouterPolicy) bool {
-			return item.Match == filterOption && item.Priority == types.EgressIPReroutePriority && item.ExternalIDs["name"] == egressIPName
+		// pattern is eipName_Namespace/podName
+		owner := strings.Split(item.ExternalIDs[libovsdbops.ObjectNameKey.String()], "_")
+		if len(owner) != 2 {
+			return false
 		}
-		if nextHopIP != "" {
-			ops, err = libovsdbops.DeleteNextHopFromLogicalRouterPoliciesWithPredicateOps(e.nbClient, ops, types.OVNClusterRouter, p, nextHopIP)
-			if err != nil {
-				return nil, fmt.Errorf("error removing nexthop IP %s from egress ip %s policies on router %s: %v",
-					nextHopIP, egressIPName, types.OVNClusterRouter, err)
-			}
-		} else {
-			klog.Errorf("Caller failed to pass next hop for EgressIP %s and IP %s. Deleting all LRPs. This will break HA momentarily",
-				egressIPName, status.EgressIP)
-			// since next hop was not found, delete everything to ensure no stale entries however this will break load
-			// balancing between hops, but we offer no guarantees except one of the EIPs will work
-			ops, err = libovsdbops.DeleteLogicalRouterPolicyWithPredicateOps(e.nbClient, ops, types.OVNClusterRouter, p)
-			if err != nil {
-				return nil, fmt.Errorf("failed to create logical router policy operations on ovn_cluster_router: %v", err)
-			}
+		eipName := owner[0]
+		owner = strings.Split(owner[1], "/")
+		if len(owner) != 2 {
+			return false
+		}
+		namespace := owner[0]
+		podName := owner[1]
+		// The owner key for this LRP will be containing the name of EIP, podNamespace, podName that owns it
+		return eipName == egressIPName && namespace == pod.Namespace && podName == pod.Name &&
+			item.ExternalIDs[libovsdbops.IPFamilyKey.String()] == ipFamilyName(isEgressIPv6)
+	}
+	if nextHopIP != "" {
+		ops, err = libovsdbops.DeleteNextHopFromLogicalRouterPoliciesWithPredicateOps(e.nbClient, ops, types.OVNClusterRouter, p, nextHopIP)
+		if err != nil {
+			return nil, fmt.Errorf("error removing nexthop IP %s from egress ip %s policies on router %s: %v",
+				nextHopIP, egressIPName, types.OVNClusterRouter, err)
+		}
+	} else {
+		klog.Errorf("Caller failed to pass next hop for EgressIP %s and IP %s. Deleting all LRPs. This will break HA momentarily",
+			egressIPName, status.EgressIP)
+		// since next hop was not found, delete everything to ensure no stale entries however this will break load
+		// balancing between hops, but we offer no guarantees except one of the EIPs will work
+		ops, err = libovsdbops.DeleteLogicalRouterPolicyWithPredicateOps(e.nbClient, ops, types.OVNClusterRouter, p)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create logical router policy operations on ovn_cluster_router: %v", err)
 		}
 	}
 	return ops, nil
@@ -1929,6 +1992,9 @@ func (e *egressIPZoneController) deleteEgressIPStatusSetup(name string, status e
 
 	if nextHopIP != "" {
 		policyPred := func(item *nbdb.LogicalRouterPolicy) bool {
+			if item.Priority != types.EgressIPReroutePriority {
+				return false
+			}
 			hasIPNexthop := false
 			for _, nexthop := range item.Nexthops {
 				if nexthop == nextHopIP {
@@ -1936,7 +2002,13 @@ func (e *egressIPZoneController) deleteEgressIPStatusSetup(name string, status e
 					break
 				}
 			}
-			return item.Priority == types.EgressIPReroutePriority && item.ExternalIDs["name"] == name && hasIPNexthop
+			// pattern is eipName_Namespace/podName
+			owner := strings.Split(item.ExternalIDs[libovsdbops.ObjectNameKey.String()], "_")
+			if len(owner) != 2 {
+				return false
+			}
+			eipName := owner[0]
+			return eipName == name && hasIPNexthop
 		}
 		ops, err = libovsdbops.DeleteNextHopFromLogicalRouterPoliciesWithPredicateOps(e.nbClient, ops, types.OVNClusterRouter, policyPred, nextHopIP)
 		if err != nil {
