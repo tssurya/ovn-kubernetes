@@ -104,27 +104,36 @@ func (a *PodAllocator) getActiveNetworkForNamespace(namespace string) (string, e
 	return util.GetActiveNetworkForNamespace(namespace, a.nadLister)
 }
 
-// isPrimaryNetwork returns if pod's primary network is same
-// as this controller's network
-func (a *PodAllocator) isPrimaryNetwork(pod *corev1.Pod) (bool, error) {
+// GetNetworkRole returns the role of this controller's
+// network for the given pod
+func (a *PodAllocator) GetNetworkRole(pod *corev1.Pod) (string, error) {
 	if !util.IsNetworkSegmentationSupportEnabled() {
 		// if user defined network segmentation is not enabled
 		// then we know pod's primary network is "default" and
 		// pod's secondary network is NOT its primary network
-		return a.netInfo.IsDefault(), nil
+		if a.netInfo.IsDefault() {
+			return types.NetworkRolePrimary, nil
+		}
+		return types.NetworkRoleSecondary, nil
 	}
 	activeNetwork, err := a.getActiveNetworkForNamespace(pod.Namespace)
 	if err != nil {
-		return false, err
+		return "", err
 	}
 	if activeNetwork == types.UnknownNetworkName {
 		// FIXME(tssurya) emit event here; add support for
 		// recorder in the NCM controller
-		return false, fmt.Errorf("unable to determine what is the"+
+		return "", fmt.Errorf("unable to determine what is the"+
 			"primary network for this pod %s; please remove multiple primary network"+
 			"NADs from namespace %s", pod.Name, pod.Namespace)
 	}
-	return activeNetwork == a.netInfo.GetNetworkName(), nil
+	if activeNetwork == a.netInfo.GetNetworkName() {
+		return types.NetworkRolePrimary, nil
+	}
+	if a.netInfo.IsDefault() {
+		return types.NetworkRoleInfrastructure, nil
+	}
+	return types.NetworkRoleSecondary, nil
 }
 
 // Reconcile allocates or releases IPs for pods updating the pod annotation
@@ -304,7 +313,7 @@ func (a *PodAllocator) allocatePodOnNAD(pod *corev1.Pod, nad string, network *ne
 
 	// don't reallocate to new IPs if currently annotated IPs fail to alloccate
 	reallocate := false
-	isPrimaryNetwork, err := a.isPrimaryNetwork(pod)
+	networkRole, err := a.GetNetworkRole(pod)
 	if err != nil {
 		return err
 	}
@@ -314,7 +323,7 @@ func (a *PodAllocator) allocatePodOnNAD(pod *corev1.Pod, nad string, network *ne
 		pod,
 		network,
 		reallocate,
-		isPrimaryNetwork,
+		networkRole,
 	)
 
 	if err != nil {
