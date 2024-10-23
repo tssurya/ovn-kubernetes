@@ -1328,14 +1328,15 @@ func ParseNetworkIDAnnotation(node *kapi.Node, netName string) (int, error) {
 	return strconv.Atoi(networkID)
 }
 
-// updateNetworkIDsAnnotation updates the ovnNetworkIDs annotation in the 'annotations' map
-// with the provided network id in 'networkID'.  If 'networkID' is InvalidNetworkID (-1)
-// it deletes the ovnNetworkIDs annotation from the map.
-func updateNetworkIDsAnnotation(annotations map[string]string, netName string, networkID int) error {
+// updateNetworkAnnotation updates the provided annotationName in the 'annotations' map
+// with the provided ID in 'annotationName”s value.  If 'ID' is InvalidNetworkID (-1)
+// it deletes the annotationName annotation from the map.
+// It is currently used for ovnNetworkIDs annotation updates
+func updateNetworkAnnotation(annotations map[string]string, netName string, ID int, annotationName string) error {
 	var bytes []byte
 
 	// First get the all network ids for all existing networks
-	networkIDsMap, err := parseNetworkMapAnnotation(annotations, ovnNetworkIDs)
+	networkIDsMap, err := parseNetworkMapAnnotation(annotations, annotationName)
 	if err != nil {
 		if !IsAnnotationNotSetError(err) {
 			return fmt.Errorf("failed to parse node network id annotation %q: %v",
@@ -1346,15 +1347,15 @@ func updateNetworkIDsAnnotation(annotations map[string]string, netName string, n
 	}
 
 	// add or delete network id of the specified network
-	if networkID == InvalidNetworkID {
+	if ID == InvalidNetworkID {
 		delete(networkIDsMap, netName)
 	} else {
-		networkIDsMap[netName] = strconv.Itoa(networkID)
+		networkIDsMap[netName] = strconv.Itoa(ID)
 	}
 
 	// if no networks left, just delete the network ids annotation from node annotations.
 	if len(networkIDsMap) == 0 {
-		delete(annotations, ovnNetworkIDs)
+		delete(annotations, annotationName)
 		return nil
 	}
 
@@ -1367,7 +1368,7 @@ func updateNetworkIDsAnnotation(annotations map[string]string, netName string, n
 	if err != nil {
 		return err
 	}
-	annotations[ovnNetworkIDs] = string(bytes)
+	annotations[annotationName] = string(bytes)
 	return nil
 }
 
@@ -1377,7 +1378,7 @@ func UpdateNetworkIDAnnotation(annotations map[string]string, netName string, ne
 	if annotations == nil {
 		annotations = map[string]string{}
 	}
-	err := updateNetworkIDsAnnotation(annotations, netName, networkID)
+	err := updateNetworkAnnotation(annotations, netName, networkID, ovnNetworkIDs)
 	if err != nil {
 		return nil, err
 	}
