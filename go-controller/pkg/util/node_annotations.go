@@ -143,8 +143,8 @@ const (
 	// default network and other layer3 secondary networks by cluster manager.
 	ovnNetworkIDs = "k8s.ovn.org/network-ids"
 
-	// invalidNetworkID signifies its an invalid network id
-	InvalidNetworkID = -1
+	// InvalidID signifies its an invalid network id
+	InvalidID = -1
 )
 
 type L3GatewayConfig struct {
@@ -1317,19 +1317,19 @@ func parseNetworkMapAnnotation(nodeAnnotations map[string]string, annotationName
 func ParseNetworkIDAnnotation(node *kapi.Node, netName string) (int, error) {
 	networkIDsMap, err := parseNetworkMapAnnotation(node.Annotations, ovnNetworkIDs)
 	if err != nil {
-		return InvalidNetworkID, err
+		return InvalidID, err
 	}
 
 	networkID, ok := networkIDsMap[netName]
 	if !ok {
-		return InvalidNetworkID, newAnnotationNotSetError("node %q has no %q annotation for network %s", node.Name, ovnNetworkIDs, netName)
+		return InvalidID, newAnnotationNotSetError("node %q has no %q annotation for network %s", node.Name, ovnNetworkIDs, netName)
 	}
 
 	return strconv.Atoi(networkID)
 }
 
 // updateNetworkAnnotation updates the provided annotationName in the 'annotations' map
-// with the provided ID in 'annotationName”s value.  If 'ID' is InvalidNetworkID (-1)
+// with the provided ID in 'annotationName's value.  If 'ID' is InvalidID (-1)
 // it deletes the annotationName annotation from the map.
 // It is currently used for ovnNetworkIDs annotation updates
 func updateNetworkAnnotation(annotations map[string]string, netName string, ID int, annotationName string) error {
@@ -1347,7 +1347,7 @@ func updateNetworkAnnotation(annotations map[string]string, netName string, ID i
 	}
 
 	// add or delete network id of the specified network
-	if ID == InvalidNetworkID {
+	if ID == InvalidID {
 		delete(networkIDsMap, netName)
 	} else {
 		networkIDsMap[netName] = strconv.Itoa(ID)
@@ -1447,11 +1447,11 @@ func GetNetworkID(nodes []*corev1.Node, nInfo BasicNetInfo) (int, error) {
 			if IsAnnotationNotSetError(err) {
 				continue
 			}
-			return InvalidNetworkID, err
+			return InvalidID, err
 		}
-		if networkID != InvalidNetworkID {
+		if networkID != InvalidID {
 			return networkID, nil
 		}
 	}
-	return InvalidNetworkID, fmt.Errorf("missing network id for network '%s'", nInfo.GetNetworkName())
+	return InvalidID, fmt.Errorf("missing network id for network '%s'", nInfo.GetNetworkName())
 }
