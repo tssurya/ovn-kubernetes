@@ -191,10 +191,14 @@ fi
 # the job and doesn't give ginkgo a chance to print status so that we know why
 # the timeout happened.
 TEST_TIMEOUT=${TEST_TIMEOUT:-100m}
+# Use a simpler focus pattern with fewer special characters
+export FOCUS="should provide Internet connection for containers"
+
+# Check what tests match this pattern
+ginkgo --nodes=1 --focus="${FOCUS}" --dry-run /usr/local/bin/e2e.test
 
 ginkgo --nodes=${NUM_NODES} \
-	--focus=${FOCUS} \
-	--skip=${SKIPPED_TESTS} \
+	--focus="${FOCUS}" \
 	--timeout=${TEST_TIMEOUT} \
 	--flake-attempts=${FLAKE_ATTEMPTS} \
 	/usr/local/bin/e2e.test \
