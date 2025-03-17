@@ -710,6 +710,17 @@ deploy_frr_external_container() {
   # for n in $KIND_NODES; do
   #   $OCI_BIN exec "$n" ip route replace default via "$FRR_IP"
   # done
+  # Add routes for pod networks dynamically
+  echo "Adding routes for Kubernetes pod networks..."
+  for node in $(kubectl get nodes -o jsonpath='{.items[*].metadata.name}'); do
+    node_ip=$(kubectl get node $node -o jsonpath='{.status.addresses[?(@.type=="InternalIP")].address}')
+    subnet=$(kubectl get node $node -o jsonpath='{.metadata.annotations.k8s\.ovn\.org/node-subnets}' | jq -r '.default[0]')
+
+    if [ -n "$subnet" ] && [ -n "$node_ip" ]; then
+      echo "Adding route for $node ($node_ip): $subnet"
+      sudo ip route add $subnet via $node_ip
+    fi
+  done
 }
 
 deploy_bgp_external_server() {
