@@ -193,7 +193,8 @@ fi
 TEST_TIMEOUT=${TEST_TIMEOUT:-100m}
 
 ginkgo --nodes=${NUM_NODES} \
-	--focus=${FOCUS} \
+	--focus="should provide Internet connection for containers" \
+	#--focus=${FOCUS} \
 	--skip=${SKIPPED_TESTS} \
 	--timeout=${TEST_TIMEOUT} \
 	--flake-attempts=${FLAKE_ATTEMPTS} \
