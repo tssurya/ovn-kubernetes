@@ -580,8 +580,13 @@ func (oc *DefaultNetworkController) deletePodSNAT(nodeName string, extIPs, podIP
 		klog.V(4).Infof("Node %s is not in the local zone %s", nodeName, oc.zone)
 		return nil
 	}
+	snatMatch, err := GetNetworkScopedClusterSubnetSNATMatch(oc.nbClient, oc.GetNetInfo(), nodeName, oc.isPodNetworkAdvertisedAtNode(nodeName))
+	if err != nil {
+		return fmt.Errorf("failed to get SNAT match on node %s for network %s: %w",
+			nodeName, oc.GetNetworkName(), err)
+	}
 	// Default network does not set any matches in Pod SNAT
-	ops, err := deletePodSNATOps(oc.nbClient, nil, oc.GetNetworkScopedGWRouterName(nodeName), extIPs, podIPNets, "")
+	ops, err := deletePodSNATOps(oc.nbClient, nil, oc.GetNetworkScopedGWRouterName(nodeName), extIPs, podIPNets, snatMatch)
 	if err != nil {
 		return err
 	}
@@ -649,7 +654,7 @@ func deletePodSNATOps(nbClient libovsdbclient.Client, ops []ovsdb.Operation, gwR
 // addOrUpdatePodSNAT adds or updates per pod SNAT rules towards the nodeIP that are applied to the GR where the pod resides
 // used when disableSNATMultipleGWs=true
 func addOrUpdatePodSNAT(nbClient libovsdbclient.Client, gwRouterName string, extIPs, podIfAddrs []*net.IPNet) error {
-	ops, err := addOrUpdatePodSNATOps(nbClient, gwRouterName, extIPs, podIfAddrs, nil)
+	ops, err := addOrUpdatePodSNATOps(nbClient, gwRouterName, extIPs, podIfAddrs, "", nil)
 	if err != nil {
 		return err
 	}
@@ -662,9 +667,9 @@ func addOrUpdatePodSNAT(nbClient libovsdbclient.Client, gwRouterName string, ext
 // addOrUpdatePodSNATOps returns the operation that adds or updates per pod SNAT rules towards the nodeIP that are
 // applied to the GR where the pod resides
 // used when disableSNATMultipleGWs=true
-func addOrUpdatePodSNATOps(nbClient libovsdbclient.Client, gwRouterName string, extIPs, podIfAddrs []*net.IPNet, ops []ovsdb.Operation) ([]ovsdb.Operation, error) {
+func addOrUpdatePodSNATOps(nbClient libovsdbclient.Client, gwRouterName string, extIPs, podIfAddrs []*net.IPNet, snatMatch string, ops []ovsdb.Operation) ([]ovsdb.Operation, error) {
 	gwRouter := &nbdb.LogicalRouter{Name: gwRouterName}
-	nats, err := buildPodSNAT(extIPs, podIfAddrs, "")
+	nats, err := buildPodSNAT(extIPs, podIfAddrs, snatMatch)
 	if err != nil {
 		return nil, err
 	}

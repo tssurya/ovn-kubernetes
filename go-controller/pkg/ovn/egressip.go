@@ -2594,7 +2594,7 @@ func (e *EgressIPController) addExternalGWPodSNATOps(ni util.NetInfo, ops []ovsd
 			if err != nil {
 				return nil, err
 			}
-			ops, err = addOrUpdatePodSNATOps(e.nbClient, ni.GetNetworkScopedGWRouterName(pod.Spec.NodeName), extIPs, podIPs, ops)
+			ops, err = addOrUpdatePodSNATOps(e.nbClient, ni.GetNetworkScopedGWRouterName(pod.Spec.NodeName), extIPs, podIPs, "", ops)
 			if err != nil {
 				return nil, err
 			}
