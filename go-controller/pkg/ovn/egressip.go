@@ -3642,7 +3642,7 @@ func (e *EgressIPController) createNATRuleOps(ni util.NetInfo, ops []ovsdb.Opera
 	gwRouter := &nbdb.LogicalRouter{
 		Name: ni.GetNetworkScopedGWRouterName(status.Node),
 	}
-	ops, err = libovsdbops.CreateOrUpdateNATsOps(e.nbClient, ops, gwRouter, nats...)
+	ops, err = libovsdbops.CreateOrUpdateNATsOps(e.nbClient, ops, gwRouter, libovsdbops.IsEquivalentNAT, nats...)
 	if err != nil {
 		return nil, fmt.Errorf("unable to create snat rules, for router: %s, error: %v", gwRouter.Name, err)
 	}

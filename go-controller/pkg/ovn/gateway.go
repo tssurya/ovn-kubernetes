@@ -773,11 +773,10 @@ func (gw *GatewayManager) updateGWRouterNAT(nodeName string, clusterIPSubnet []*
 				return fmt.Errorf("failed to create default SNAT rules for gateway router %s: %v",
 					gw.gwRouterName, err)
 			}
-
 			nat = libovsdbops.BuildSNATWithMatch(&externalIP[0], entry, "", extIDs, gw.netInfo.GetNetworkScopedClusterSubnetSNATMatch(nodeName))
 			nats = append(nats, nat)
 		}
-		err = libovsdbops.CreateOrUpdateNATs(gw.nbClient, gwRouter, nats...)
+		err := libovsdbops.CreateOrUpdateNATsWithMatch(gw.nbClient, gwRouter, nats...)
 		if err != nil {
 			return fmt.Errorf("failed to update SNAT rule for pod on router %s error: %v", gw.gwRouterName, err)
 		}
