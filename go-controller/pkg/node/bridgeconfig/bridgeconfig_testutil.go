@@ -5,6 +5,7 @@ import (
 	"net"
 	"strings"
 
+	"k8s.io/klog/v2"
 	net2 "k8s.io/utils/net"
 
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
@@ -89,6 +90,7 @@ func CheckAdvertisedUDNSvcIsolationOVSFlows(flows []string, netConfig *BridgeUDN
 	for _, flow := range flows {
 		if strings.Contains(flow, fmt.Sprintf("priority=200, table=2, %s, %s_src=%s, actions=drop",
 			protoPrefix, protoPrefix, matchingIPFamilySubnet)) {
+			klog.Infof("SURYA: flow: %s", flow)
 			nFlows++
 		}
 		if strings.Contains(flow, fmt.Sprintf("priority=550, in_port=LOCAL, %s, %s_src=%s, %s_dst=%s, actions=ct(commit,zone=64001,table=2)",
