@@ -828,10 +828,11 @@ func (bsnc *BaseSecondaryNetworkController) buildUDNEgressSNAT(localPodSubnets [
 		types.TopologyExternalID: bsnc.TopologyType(),
 	}
 	for _, localPodSubnet := range localPodSubnets {
+		ipFamily := utilnet.IPv4
+		masqIP, err = udn.AllocateV4MasqueradeIPs(networkID)
 		if utilnet.IsIPv6CIDR(localPodSubnet) {
 			masqIP, err = udn.AllocateV6MasqueradeIPs(networkID)
-		} else {
-			masqIP, err = udn.AllocateV4MasqueradeIPs(networkID)
+			ipFamily = utilnet.IPv6
 		}
 		if err != nil {
 			return nil, err
@@ -852,8 +853,10 @@ func (bsnc *BaseSecondaryNetworkController) buildUDNEgressSNAT(localPodSubnets [
 				return nil, fmt.Errorf("cannot ensure that addressSet %s exists: %w", NodeIPAddrSetName, err)
 			}
 			ipv4ClusterNodeIPAS, ipv6ClusterNodeIPAS := addrSet.GetASHashNames()
+
 			snats = append(snats, libovsdbops.BuildSNATWithMatch(&masqIP.ManagementPort.IP, localPodSubnet, outputPort,
-				extIDs, fmt.Sprintf("%s && (%s)", getMasqueradeManagementIPSNATMatch(dstMac.String()), getClusterNodesDestinationBasedSNATMatch(ipv4ClusterNodeIPAS, ipv6ClusterNodeIPAS))))
+				extIDs, fmt.Sprintf("%s && (%s)", getMasqueradeManagementIPSNATMatch(dstMac.String()),
+					getClusterNodesDestinationBasedSNATMatch(ipv4ClusterNodeIPAS, ipv6ClusterNodeIPAS, ipFamily))))
 		}
 	}
 	return snats, nil
@@ -863,14 +866,15 @@ func getMasqueradeManagementIPSNATMatch(dstMac string) string {
 	return fmt.Sprintf("eth.dst == %s", dstMac)
 }
 
-func getClusterNodesDestinationBasedSNATMatch(ipv4ClusterNodeIPAS, ipv6ClusterNodeIPAS string) string {
-	if config.IPv4Mode && config.IPv6Mode {
-		return fmt.Sprintf("ip4.dst == $%s || ip6.dst == $%s", ipv4ClusterNodeIPAS, ipv6ClusterNodeIPAS)
-	} else if config.IPv4Mode {
-		return fmt.Sprintf("ip4.dst == $%s", ipv4ClusterNodeIPAS)
+// getClusterNodesDestinationBasedSNATMatch creates destination-based SNAT match for the specified IP family
+func getClusterNodesDestinationBasedSNATMatch(ipv4ClusterNodeIPAS, ipv6ClusterNodeIPAS string, ipFamily utilnet.IPFamily) string {
+	var match string
+	if ipFamily == utilnet.IPv4 {
+		match = fmt.Sprintf("ip4.dst == $%s", ipv4ClusterNodeIPAS)
 	} else {
-		return fmt.Sprintf("ip6.dst == $%s", ipv6ClusterNodeIPAS)
+		match = fmt.Sprintf("ip6.dst == $%s", ipv6ClusterNodeIPAS)
 	}
+	return match
 }
 
 func (bsnc *BaseSecondaryNetworkController) ensureDHCP(pod *corev1.Pod, podAnnotation *util.PodAnnotation, lsp *nbdb.LogicalSwitchPort) error {

@@ -764,10 +764,6 @@ func (gw *GatewayManager) updateGWRouterNAT(nodeName string, clusterIPSubnet []*
 
 	nats := make([]*nbdb.NAT, 0, len(clusterIPSubnet))
 	var nat *nbdb.NAT
-	snatMatch, err := GetNetworkScopedClusterSubnetSNATMatch(gw.nbClient, gw.netInfo, nodeName, gw.isRoutingAdvertised(nodeName))
-	if err != nil {
-		return fmt.Errorf("failed to get SNAT match for node %s for network %s: %w", nodeName, gw.netInfo.GetNetworkName(), err)
-	}
 	// DisableSNATMultipleGWs is only applicable to cluster default network and not to user defined networks.
 	// For user defined networks, we always add SNAT rules regardless of whether the network is advertised or not.
 	if !config.Gateway.DisableSNATMultipleGWs || gw.netInfo.IsPrimaryNetwork() {
@@ -779,6 +775,17 @@ func (gw *GatewayManager) updateGWRouterNAT(nodeName string, clusterIPSubnet []*
 				return fmt.Errorf("failed to create default SNAT rules for gateway router %s: %v",
 					gw.gwRouterName, err)
 			}
+
+			// Get the match for this specific subnet's IP family
+			ipFamily := utilnet.IPv4
+			if utilnet.IsIPv6CIDR(entry) {
+				ipFamily = utilnet.IPv6
+			}
+			snatMatch, err := GetNetworkScopedClusterSubnetSNATMatch(gw.nbClient, gw.netInfo, nodeName, gw.isRoutingAdvertised(nodeName), ipFamily)
+			if err != nil {
+				return fmt.Errorf("failed to get SNAT match for node %s for network %s: %w", nodeName, gw.netInfo.GetNetworkName(), err)
+			}
+
 			nat = libovsdbops.BuildSNATWithMatch(&externalIP[0], entry, "", extIDs, snatMatch)
 			nats = append(nats, nat)
 		}
@@ -789,6 +796,16 @@ func (gw *GatewayManager) updateGWRouterNAT(nodeName string, clusterIPSubnet []*
 	} else {
 		// ensure we do not have any leftover SNAT entries after an upgrade
 		for _, logicalSubnet := range clusterIPSubnet {
+			// Get the match for this specific subnet's IP family
+			ipFamily := utilnet.IPv4
+			if utilnet.IsIPv6CIDR(logicalSubnet) {
+				ipFamily = utilnet.IPv6
+			}
+			snatMatch, err := GetNetworkScopedClusterSubnetSNATMatch(gw.nbClient, gw.netInfo, nodeName, gw.isRoutingAdvertised(nodeName), ipFamily)
+			if err != nil {
+				return fmt.Errorf("failed to get SNAT match for node %s for network %s: %w", nodeName, gw.netInfo.GetNetworkName(), err)
+			}
+
 			nat = libovsdbops.BuildSNATWithMatch(nil, logicalSubnet, "", extIDs, snatMatch)
 			nats = append(nats, nat)
 		}
@@ -915,7 +932,7 @@ func (gw *GatewayManager) gatewayInit(
 // If the network is advertised:
 // - For Layer2 topology, the match is the output port of the GR to the join switch and the destination must be a nodeIP in the cluster.
 // - For Layer3 topology, the match is the destination must be a nodeIP in the cluster.
-func GetNetworkScopedClusterSubnetSNATMatch(nbClient libovsdbclient.Client, netInfo util.NetInfo, nodeName string, isNetworkAdvertised bool) (string, error) {
+func GetNetworkScopedClusterSubnetSNATMatch(nbClient libovsdbclient.Client, netInfo util.NetInfo, nodeName string, isNetworkAdvertised bool, ipFamily utilnet.IPFamily) (string, error) {
 	if !isNetworkAdvertised {
 		if netInfo.TopologyType() != types.Layer2Topology {
 			return "", nil
@@ -930,7 +947,7 @@ func GetNetworkScopedClusterSubnetSNATMatch(nbClient libovsdbclient.Client, netI
 			return "", fmt.Errorf("cannot ensure that addressSet %s exists %v", NodeIPAddrSetName, err)
 		}
 		ipv4ClusterNodeIPAS, ipv6ClusterNodeIPAS := addrSet.GetASHashNames()
-		destinationMatch := getClusterNodesDestinationBasedSNATMatch(ipv4ClusterNodeIPAS, ipv6ClusterNodeIPAS)
+		destinationMatch := getClusterNodesDestinationBasedSNATMatch(ipv4ClusterNodeIPAS, ipv6ClusterNodeIPAS, ipFamily)
 		if netInfo.TopologyType() != types.Layer2Topology {
 			return destinationMatch, nil
 		}

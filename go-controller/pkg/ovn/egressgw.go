@@ -580,15 +580,23 @@ func (oc *DefaultNetworkController) deletePodSNAT(nodeName string, extIPs, podIP
 		klog.V(4).Infof("Node %s is not in the local zone %s", nodeName, oc.zone)
 		return nil
 	}
-	snatMatch, err := GetNetworkScopedClusterSubnetSNATMatch(oc.nbClient, oc.GetNetInfo(), nodeName, oc.isPodNetworkAdvertisedAtNode(nodeName))
-	if err != nil {
-		return fmt.Errorf("failed to get SNAT match on node %s for network %s: %w",
-			nodeName, oc.GetNetworkName(), err)
-	}
 	// Default network does not set any matches in Pod SNAT
-	ops, err := deletePodSNATOps(oc.nbClient, nil, oc.GetNetworkScopedGWRouterName(nodeName), extIPs, podIPNets, snatMatch)
-	if err != nil {
-		return err
+	// Handle each pod IP individually since each IP family needs its own SNAT match
+	var ops []ovsdb.Operation
+	for _, podIPNet := range podIPNets {
+		ipFamily := utilnet.IPv4
+		if utilnet.IsIPv6CIDR(podIPNet) {
+			ipFamily = utilnet.IPv6
+		}
+		snatMatch, err := GetNetworkScopedClusterSubnetSNATMatch(oc.nbClient, oc.GetNetInfo(), nodeName, oc.isPodNetworkAdvertisedAtNode(nodeName), ipFamily)
+		if err != nil {
+			return fmt.Errorf("failed to get SNAT match on node %s for network %s: %w",
+				nodeName, oc.GetNetworkName(), err)
+		}
+		ops, err = deletePodSNATOps(oc.nbClient, ops, oc.GetNetworkScopedGWRouterName(nodeName), extIPs, []*net.IPNet{podIPNet}, snatMatch)
+		if err != nil {
+			return err
+		}
 	}
 
 	_, err = libovsdbops.TransactAndCheck(oc.nbClient, ops)
