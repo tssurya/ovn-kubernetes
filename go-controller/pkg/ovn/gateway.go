@@ -158,7 +158,7 @@ func (gw *GatewayManager) cleanupStalePodSNATs(nodeName string, nodeIPs []*net.I
 	// network is advertised or DisableSNATMultipleGWs==false we consider all
 	// the SNATs stale
 	podIPsWithSNAT := sets.New[string]()
-	if !gw.isRoutingAdvertised(nodeName) && config.Gateway.DisableSNATMultipleGWs {
+	if config.Gateway.DisableSNATMultipleGWs {
 		pods, err := gw.watchFactory.GetAllPods()
 		if err != nil {
 			return fmt.Errorf("unable to list existing pods on node: %s, %w",
