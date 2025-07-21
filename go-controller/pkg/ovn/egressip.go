@@ -1783,7 +1783,7 @@ func (e *EgressIPController) syncStaleSNATRules(egressIPCache egressIPCache) err
 	var errors []error
 	ops := []ovsdb.Operation{}
 	for _, router := range routers {
-		ops, err = libovsdbops.DeleteNATsOps(e.nbClient, ops, router, nats...)
+		ops, err = libovsdbops.DeleteNATsOpsWithMatch(e.nbClient, ops, router, nats...)
 		if err != nil {
 			errors = append(errors, fmt.Errorf("error deleting stale NAT from router %s: %v", router.Name, err))
 			continue
@@ -2630,21 +2630,11 @@ func (e *EgressIPController) deleteExternalGWPodSNATOps(ni util.NetInfo, ops []o
 			return nil, err
 		}
 
-		// Handle each affected IP individually since each IP family needs its own SNAT match
-		for _, affectedIP := range affectedIPs {
-			ipFamily := utilnet.IPv4
-			if utilnet.IsIPv6CIDR(affectedIP) {
-				ipFamily = utilnet.IPv6
-			}
-			snatMatch, err := GetNetworkScopedClusterSubnetSNATMatch(e.nbClient, ni, pod.Spec.NodeName, util.IsPodNetworkAdvertisedAtNode(ni, pod.Spec.NodeName), ipFamily)
-			if err != nil {
-				return nil, fmt.Errorf("failed to get SNAT match for node %s for network %s: %w", pod.Spec.NodeName, ni.GetNetworkName(), err)
-			}
-			ops, err = deletePodSNATOps(e.nbClient, ops, ni.GetNetworkScopedGWRouterName(pod.Spec.NodeName), extIPs, []*net.IPNet{affectedIP}, snatMatch)
-			if err != nil {
-				return nil, err
-			}
+		ops, err = deletePodSNATOps(e.nbClient, ops, ni.GetNetworkScopedGWRouterName(pod.Spec.NodeName), extIPs, affectedIPs)
+		if err != nil {
+			return nil, err
 		}
+
 	} else if config.Gateway.DisableSNATMultipleGWs {
 		// it means the pod host is different from the egressNode that is managing the pod
 		klog.V(5).Infof("Not deleting SNAT on %s since egress node managing %s/%s is %s or Egress IP is not SNAT'd by OVN", pod.Spec.NodeName, pod.Namespace, pod.Name, status.Node)

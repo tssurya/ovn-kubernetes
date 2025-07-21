@@ -1221,7 +1221,8 @@ func CreateOrUpdateNATsWithMatch(nbClient libovsdbclient.Client, router *nbdb.Lo
 
 // DeleteNATsOps deletes the provided NATs, removes them from the provided
 // logical router and returns the corresponding ops
-func DeleteNATsOps(nbClient libovsdbclient.Client, ops []ovsdb.Operation, router *nbdb.LogicalRouter, nats ...*nbdb.NAT) ([]ovsdb.Operation, error) {
+func DeleteNATsOps(nbClient libovsdbclient.Client, ops []ovsdb.Operation, router *nbdb.LogicalRouter,
+	equivalentNATFunc func(*nbdb.NAT, *nbdb.NAT) bool, nats ...*nbdb.NAT) ([]ovsdb.Operation, error) {
 	routerNats, err := GetRouterNATs(nbClient, router)
 	if errors.Is(err, libovsdbclient.ErrNotFound) {
 		return ops, nil
@@ -1235,7 +1236,7 @@ func DeleteNATsOps(nbClient libovsdbclient.Client, ops []ovsdb.Operation, router
 	opModels := make([]operationModel, 0, len(routerNats)+1)
 	for _, routerNat := range routerNats {
 		for _, inputNat := range nats {
-			if IsEquivalentNAT(routerNat, inputNat) {
+			if equivalentNATFunc(routerNat, inputNat) {
 				router.Nat = append(router.Nat, routerNat.UUID)
 				opModel := operationModel{
 					Model:       routerNat,
@@ -1264,10 +1265,18 @@ func DeleteNATsOps(nbClient libovsdbclient.Client, ops []ovsdb.Operation, router
 	return ops, err
 }
 
+func DeleteNATsOpsWithMatch(nbClient libovsdbclient.Client, ops []ovsdb.Operation, router *nbdb.LogicalRouter, nats ...*nbdb.NAT) ([]ovsdb.Operation, error) {
+	ops, err := DeleteNATsOps(nbClient, ops, router, IsEquivalentNATExceptMatch, nats...)
+	if err != nil {
+		return nil, err
+	}
+	return ops, nil
+}
+
 // DeleteNATs deletes the provided NATs and removes them from the provided
 // logical router
 func DeleteNATs(nbClient libovsdbclient.Client, router *nbdb.LogicalRouter, nats ...*nbdb.NAT) error {
-	ops, err := DeleteNATsOps(nbClient, nil, router, nats...)
+	ops, err := DeleteNATsOps(nbClient, nil, router, IsEquivalentNAT, nats...)
 	if err != nil {
 		return err
 	}

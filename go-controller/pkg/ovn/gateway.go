@@ -796,17 +796,7 @@ func (gw *GatewayManager) updateGWRouterNAT(nodeName string, clusterIPSubnet []*
 	} else {
 		// ensure we do not have any leftover SNAT entries after an upgrade
 		for _, logicalSubnet := range clusterIPSubnet {
-			// Get the match for this specific subnet's IP family
-			ipFamily := utilnet.IPv4
-			if utilnet.IsIPv6CIDR(logicalSubnet) {
-				ipFamily = utilnet.IPv6
-			}
-			snatMatch, err := GetNetworkScopedClusterSubnetSNATMatch(gw.nbClient, gw.netInfo, nodeName, gw.isRoutingAdvertised(nodeName), ipFamily)
-			if err != nil {
-				return fmt.Errorf("failed to get SNAT match for node %s for network %s: %w", nodeName, gw.netInfo.GetNetworkName(), err)
-			}
-
-			nat = libovsdbops.BuildSNATWithMatch(nil, logicalSubnet, "", extIDs, snatMatch)
+			nat = libovsdbops.BuildSNAT(nil, logicalSubnet, "", extIDs)
 			nats = append(nats, nat)
 		}
 		err = libovsdbops.DeleteNATs(gw.nbClient, gwRouter, nats...)

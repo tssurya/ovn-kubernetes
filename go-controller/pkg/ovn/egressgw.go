@@ -582,21 +582,9 @@ func (oc *DefaultNetworkController) deletePodSNAT(nodeName string, extIPs, podIP
 	}
 	// Default network does not set any matches in Pod SNAT
 	// Handle each pod IP individually since each IP family needs its own SNAT match
-	var ops []ovsdb.Operation
-	for _, podIPNet := range podIPNets {
-		ipFamily := utilnet.IPv4
-		if utilnet.IsIPv6CIDR(podIPNet) {
-			ipFamily = utilnet.IPv6
-		}
-		snatMatch, err := GetNetworkScopedClusterSubnetSNATMatch(oc.nbClient, oc.GetNetInfo(), nodeName, oc.isPodNetworkAdvertisedAtNode(nodeName), ipFamily)
-		if err != nil {
-			return fmt.Errorf("failed to get SNAT match on node %s for network %s: %w",
-				nodeName, oc.GetNetworkName(), err)
-		}
-		ops, err = deletePodSNATOps(oc.nbClient, ops, oc.GetNetworkScopedGWRouterName(nodeName), extIPs, []*net.IPNet{podIPNet}, snatMatch)
-		if err != nil {
-			return err
-		}
+	ops, err := deletePodSNATOps(oc.nbClient, nil, oc.GetNetworkScopedGWRouterName(nodeName), extIPs, podIPNets)
+	if err != nil {
+		return err
 	}
 
 	_, err = libovsdbops.TransactAndCheck(oc.nbClient, ops)
@@ -644,15 +632,15 @@ func getExternalIPsGR(watchFactory *factory.WatchFactory, nodeName string) ([]*n
 
 // deletePodSNATOps creates ovsdb operation that removes per pod SNAT rules towards the nodeIP that are applied to the GR where the pod resides
 // used when disableSNATMultipleGWs=true
-func deletePodSNATOps(nbClient libovsdbclient.Client, ops []ovsdb.Operation, gwRouterName string, extIPs, podIPNets []*net.IPNet, match string) ([]ovsdb.Operation, error) {
-	nats, err := buildPodSNAT(extIPs, podIPNets, match)
+func deletePodSNATOps(nbClient libovsdbclient.Client, ops []ovsdb.Operation, gwRouterName string, extIPs, podIPNets []*net.IPNet) ([]ovsdb.Operation, error) {
+	nats, err := buildPodSNAT(extIPs, podIPNets, "")
 	if err != nil {
 		return nil, err
 	}
 	logicalRouter := nbdb.LogicalRouter{
 		Name: gwRouterName,
 	}
-	ops, err = libovsdbops.DeleteNATsOps(nbClient, ops, &logicalRouter, nats...)
+	ops, err = libovsdbops.DeleteNATsOpsWithMatch(nbClient, ops, &logicalRouter, nats...)
 	if err != nil && !errors.Is(err, libovsdbclient.ErrNotFound) {
 		return nil, fmt.Errorf("failed create operation for deleting SNAT rule for pod on gateway router %s: %v", logicalRouter.Name, err)
 	}
