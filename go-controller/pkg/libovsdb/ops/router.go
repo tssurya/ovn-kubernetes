@@ -1285,6 +1285,18 @@ func DeleteNATs(nbClient libovsdbclient.Client, router *nbdb.LogicalRouter, nats
 	return err
 }
 
+// DeleteNATs deletes the provided NATs and removes them from the provided
+// logical router
+func DeleteNATsWithMatch(nbClient libovsdbclient.Client, router *nbdb.LogicalRouter, nats ...*nbdb.NAT) error {
+	ops, err := DeleteNATsOpsWithMatch(nbClient, nil, router, nats...)
+	if err != nil {
+		return err
+	}
+
+	_, err = TransactAndCheck(nbClient, ops)
+	return err
+}
+
 // DeleteNATsWithPredicateOps looks up NATs from the cache based on a given
 // predicate, deletes them, removes them from associated logical routers and
 // returns the corresponding ops

@@ -582,7 +582,7 @@ func (oc *DefaultNetworkController) deletePodSNAT(nodeName string, extIPs, podIP
 	}
 	// Default network does not set any matches in Pod SNAT
 	// Handle each pod IP individually since each IP family needs its own SNAT match
-	ops, err := deletePodSNATOps(oc.nbClient, nil, oc.GetNetworkScopedGWRouterName(nodeName), extIPs, podIPNets)
+	ops, err := deletePodSNATOps(oc.nbClient, nil, oc.GetNetworkScopedGWRouterName(nodeName), extIPs, podIPNets, "")
 	if err != nil {
 		return err
 	}
@@ -632,8 +632,8 @@ func getExternalIPsGR(watchFactory *factory.WatchFactory, nodeName string) ([]*n
 
 // deletePodSNATOps creates ovsdb operation that removes per pod SNAT rules towards the nodeIP that are applied to the GR where the pod resides
 // used when disableSNATMultipleGWs=true
-func deletePodSNATOps(nbClient libovsdbclient.Client, ops []ovsdb.Operation, gwRouterName string, extIPs, podIPNets []*net.IPNet) ([]ovsdb.Operation, error) {
-	nats, err := buildPodSNAT(extIPs, podIPNets, "")
+func deletePodSNATOps(nbClient libovsdbclient.Client, ops []ovsdb.Operation, gwRouterName string, extIPs, podIPNets []*net.IPNet, snatMatch string) ([]ovsdb.Operation, error) {
+	nats, err := buildPodSNAT(extIPs, podIPNets, snatMatch)
 	if err != nil {
 		return nil, err
 	}
