@@ -63,6 +63,10 @@ import (
 	adminbasedpolicyscheme "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/adminpolicybasedroute/v1/apis/clientset/versioned/scheme"
 	adminbasedpolicyinformerfactory "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/adminpolicybasedroute/v1/apis/informers/externalversions"
 	adminpolicybasedrouteinformer "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/adminpolicybasedroute/v1/apis/informers/externalversions/adminpolicybasedroute/v1"
+	networkconnectapi "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/clusternetworkconnect/v1"
+	networkconnectscheme "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/clusternetworkconnect/v1/apis/clientset/versioned/scheme"
+	networkconnectinformerfactory "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/clusternetworkconnect/v1/apis/informers/externalversions"
+	networkconnectinformer "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/clusternetworkconnect/v1/apis/informers/externalversions/clusternetworkconnect/v1"
 	egressfirewallapi "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressfirewall/v1"
 	egressfirewallscheme "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressfirewall/v1/apis/clientset/versioned/scheme"
 	egressfirewallinformerfactory "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressfirewall/v1/apis/informers/externalversions"
@@ -121,6 +125,7 @@ type WatchFactory struct {
 	ipamClaimsFactory    ipamclaimsfactory.SharedInformerFactory
 	nadFactory           nadinformerfactory.SharedInformerFactory
 	udnFactory           userdefinednetworkapiinformerfactory.SharedInformerFactory
+	cncFactory           networkconnectinformerfactory.SharedInformerFactory
 	raFactory            routeadvertisementsinformerfactory.SharedInformerFactory
 	frrFactory           frrinformerfactory.SharedInformerFactory
 	networkQoSFactory    networkqosinformerfactory.SharedInformerFactory
@@ -149,6 +154,7 @@ func (wf *WatchFactory) ShallowClone() *WatchFactory {
 		ipamClaimsFactory:    wf.ipamClaimsFactory,
 		nadFactory:           wf.nadFactory,
 		udnFactory:           wf.udnFactory,
+		cncFactory:           wf.cncFactory,
 		raFactory:            wf.raFactory,
 		frrFactory:           wf.frrFactory,
 		networkQoSFactory:    wf.networkQoSFactory,
@@ -247,7 +253,7 @@ var (
 	UserDefinedNetworkType                reflect.Type = reflect.TypeOf(&userdefinednetworkapi.UserDefinedNetwork{})
 	ClusterUserDefinedNetworkType         reflect.Type = reflect.TypeOf(&userdefinednetworkapi.ClusterUserDefinedNetwork{})
 	NetworkQoSType                        reflect.Type = reflect.TypeOf(&networkqosapi.NetworkQoS{})
-
+	ClusterNetworkConnectType             reflect.Type = reflect.TypeOf(&networkconnectapi.ClusterNetworkConnect{})
 	// Resource types used in ovnk node
 	NamespaceExGwType                         reflect.Type = reflect.TypeOf(&namespaceExGw{})
 	EndpointSliceForStaleConntrackRemovalType reflect.Type = reflect.TypeOf(&endpointSliceForStaleConntrackRemoval{})
@@ -676,6 +682,10 @@ func (wf *WatchFactory) Stop() {
 		wf.udnFactory.Shutdown()
 	}
 
+	if wf.cncFactory != nil {
+		wf.cncFactory.Shutdown()
+	}
+
 	if wf.raFactory != nil {
 		wf.raFactory.Shutdown()
 	}
@@ -874,6 +884,7 @@ func NewClusterManagerWatchFactory(ovnClientset *util.OVNClusterManagerClientset
 		apbRouteFactory:      adminbasedpolicyinformerfactory.NewSharedInformerFactory(ovnClientset.AdminPolicyRouteClient, resyncInterval),
 		egressQoSFactory:     egressqosinformerfactory.NewSharedInformerFactory(ovnClientset.EgressQoSClient, resyncInterval),
 		networkQoSFactory:    networkqosinformerfactory.NewSharedInformerFactory(ovnClientset.NetworkQoSClient, resyncInterval),
+		cncFactory:           networkconnectinformerfactory.NewSharedInformerFactory(ovnClientset.NetworkConnectClient, resyncInterval),
 		informers:            make(map[reflect.Type]*informer),
 		stopChan:             make(chan struct{}),
 	}
@@ -898,6 +909,9 @@ func NewClusterManagerWatchFactory(ovnClientset *util.OVNClusterManagerClientset
 		return nil, err
 	}
 	if err := userdefinednetworkapi.AddToScheme(userdefinednetworkscheme.Scheme); err != nil {
+		return nil, err
+	}
+	if err := networkconnectapi.AddToScheme(networkconnectscheme.Scheme); err != nil {
 		return nil, err
 	}
 	if err := routeadvertisementsapi.AddToScheme(routeadvertisementsscheme.Scheme); err != nil {
@@ -1048,6 +1062,16 @@ func NewClusterManagerWatchFactory(ovnClientset *util.OVNClusterManagerClientset
 		wf.iFactory.Core().V1().Pods().Informer()
 	}
 
+	if util.IsNetworkConnectEnabled() {
+		wf.informers[ClusterNetworkConnectType], err = newQueuedInformer(eventQueueSize,
+			ClusterNetworkConnectType,
+			wf.cncFactory.K8s().V1().ClusterNetworkConnects().Informer(),
+			wf.stopChan, minNumEventQueues)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	if util.IsRouteAdvertisementsEnabled() {
 		wf.informers[NamespaceType], err = newQueuedInformer(eventQueueSize, NamespaceType, wf.iFactory.Core().V1().Namespaces().Informer(),
 			wf.stopChan, defaultNumEventQueues)
@@ -1151,6 +1175,10 @@ func getObjectMeta(objType reflect.Type, obj interface{}) (*metav1.ObjectMeta, e
 	case ClusterUserDefinedNetworkType:
 		if cudn, ok := obj.(*userdefinednetworkapi.ClusterUserDefinedNetwork); ok {
 			return &cudn.ObjectMeta, nil
+		}
+	case ClusterNetworkConnectType:
+		if cnc, ok := obj.(*networkconnectapi.ClusterNetworkConnect); ok {
+			return &cnc.ObjectMeta, nil
 		}
 	case NetworkQoSType:
 		if networkQoS, ok := obj.(*networkqosapi.NetworkQoS); ok {
@@ -1765,6 +1793,10 @@ func (wf *WatchFactory) UserDefinedNetworkInformer() userdefinednetworkinformer.
 
 func (wf *WatchFactory) ClusterUserDefinedNetworkInformer() userdefinednetworkinformer.ClusterUserDefinedNetworkInformer {
 	return wf.udnFactory.K8s().V1().ClusterUserDefinedNetworks()
+}
+
+func (wf *WatchFactory) ClusterNetworkConnectInformer() networkconnectinformer.ClusterNetworkConnectInformer {
+	return wf.cncFactory.K8s().V1().ClusterNetworkConnects()
 }
 
 func (wf *WatchFactory) DNSNameResolverInformer() ocpnetworkinformerv1alpha1.DNSNameResolverInformer {
