@@ -2,6 +2,7 @@ package networkconnect
 
 import (
 	"reflect"
+	"sync"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -13,6 +14,7 @@ import (
 	nadv1 "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/apis/k8s.cni.cncf.io/v1"
 	nadclientset "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/client/clientset/versioned"
 	nadlisters "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/client/listers/k8s.cni.cncf.io/v1"
+	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/clustermanager/node"
 	controllerutil "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/controller"
 	networkconnectv1 "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/clusternetworkconnect/v1"
 	networkconnectclientset "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/clusternetworkconnect/v1/apis/clientset/versioned"
@@ -20,6 +22,7 @@ import (
 	userdefinednetworkv1 "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/userdefinednetwork/v1"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/factory"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/networkmanager"
+	ovntypes "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
 )
 
@@ -46,6 +49,9 @@ type Controller struct {
 	// Controller for managing NetworkAttachmentDefinition events
 	nadController  controllerutil.Controller
 	networkManager networkmanager.Interface
+
+	p2pSubnetAllocator     map[string]node.SubnetAllocator
+	p2pSubnetAllocatorLock sync.RWMutex
 }
 
 func NewController(
@@ -171,9 +177,12 @@ func nadNeedsUpdate(oldObj, newObj *nadv1.NetworkAttachmentDefinition) bool {
 	if newObj != nil {
 		newNADLabels = labels.Set(newObj.Labels)
 	}
+	labelsChanged := !labels.Equals(oldNADLabels, newNADLabels)
+	// safe spot check for ovn network id annotation add happening as update to NADs
+	annotationsChanged := oldObj.Annotations[ovntypes.OvnNetworkIDAnnotation] != newObj.Annotations[ovntypes.OvnNetworkIDAnnotation]
 	// Only trigger NAD updates when the object is created or deleted (UDNs->NADs)
 	// Only trigger NAD updates when the labels change (CUDNs->NADs)
-	return oldObj == nil || newObj == nil || !labels.Equals(oldNADLabels, newNADLabels)
+	return oldObj == nil || newObj == nil || labelsChanged || annotationsChanged
 }
 
 func nodeNeedsUpdate(oldObj, newObj *corev1.Node) bool {
