@@ -182,15 +182,6 @@ func nodeNeedsUpdate(oldObj, newObj *corev1.Node) bool {
 	return oldObj == nil || newObj == nil
 }
 
-func (c *Controller) reconcileClusterNetworkConnect(key string) error {
-	// STEP1: Validate the CNC
-	// STEP2: Discover the selected UDNs and CUDNs
-	// STEP3: Generate /31 subnets for each node-network pair for layer3 networks and one /31 subnet for each layer2 networks
-	// STEP4: Generate a tunnelID for the connect router corresponding to this CNC
-
-	return nil
-}
-
 func (c *Controller) reconcileNAD(key string) error {
 	return nil
 }
