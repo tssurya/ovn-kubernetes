@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"os"
+	"os/exec"
 	"strings"
 	"time"
 
@@ -869,6 +871,15 @@ var _ = ginkgo.Describe("EVPN: Pod connectivity to external servers via EVPN", f
 			ginkgo.By("Creating RouteAdvertisements")
 			err = createRouteAdvertisements(f, ictx, testBaseName, testBaseName, networkLabels, networkLabels)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+
+			// TEMPORARY: Run external script for cluster-side EVPN setup until OVN-K8s implements it
+			ginkgo.By("Running external EVPN setup script (temporary until OVN-K8s EVPN implementation)")
+			evpnScript := "/home/surya/go/src/github.com/evpnlab/KIND/evpn-e2e-setup.sh"
+			cmd := exec.Command(evpnScript)
+			cmd.Env = append(os.Environ(), "USE_EXISTING=true")
+			output, err := cmd.CombinedOutput()
+			framework.Logf("EVPN script output:\n%s", string(output))
+			gomega.Expect(err).NotTo(gomega.HaveOccurred(), "EVPN script failed: %s", string(output))
 
 			ginkgo.By("Creating test pod on CUDN")
 			testPod := e2epod.CreateExecPodOrFail(
