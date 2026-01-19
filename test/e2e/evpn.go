@@ -811,7 +811,7 @@ func cleanupIPVRFConfig(frr infraapi.ExternalContainer, vrfName string) error {
 // EVPN e2e tests
 var _ = ginkgo.Describe("EVPN: Pod connectivity to external servers via EVPN", func() {
 	const (
-		timeout              = 240 * time.Second
+		timeout              = 120 * time.Second
 		netexecPort          = 8080
 		vtepSubnetIPv4       = "100.64.0.0/24"
 		existingFRRName      = "frr"
@@ -982,8 +982,9 @@ var _ = ginkgo.Describe("EVPN: Pod connectivity to external servers via EVPN", f
 
 			ginkgo.By("Creating RouteAdvertisements")
 			// Use only {network: testBaseName} for frrConfigurationSelector to match the FRRConfiguration we just created
+			// Use empty targetVRF for EVPN - we use default VRF with l2vpn evpn enabled
 			frrConfigLabels := map[string]string{"network": testBaseName}
-			err = createRouteAdvertisements(f, ictx, testBaseName, testBaseName, networkLabels, frrConfigLabels)
+			err = createRouteAdvertisements(f, ictx, testBaseName, "", networkLabels, frrConfigLabels)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 			// TEMPORARY: Run external script for cluster-side EVPN setup until OVN-K8s implements it
