@@ -2443,12 +2443,23 @@ type templateInputRouter struct {
 	NetworksIPv6  []string
 }
 
+// templateInputIPVRF holds IP-VRF configuration for EVPN FRRConfiguration
+type templateInputIPVRF struct {
+	VRFName string
+	L3VNI   int
+	Subnet  string
+}
+
 // templateInputFRR data
 type templateInputFRR struct {
 	// Name and Label are used for FRRConfiguration metadata
 	Name    string
 	Labels  map[string]string
 	Routers []templateInputRouter
+	// EVPN enables l2vpn evpn address family in raw config
+	EVPN bool
+	// IPVRFs holds IP-VRF configurations for EVPN (only used if EVPN is true)
+	IPVRFs []templateInputIPVRF
 }
 
 // for routeadvertisements test cases we generate configuration from templates embed in the program

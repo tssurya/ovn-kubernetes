@@ -6,7 +6,9 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
+	"text/template"
 	"time"
 
 	"github.com/onsi/ginkgo/v2"
@@ -15,12 +17,14 @@ import (
 	udnv1 "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/userdefinednetwork/v1"
 	vtepv1 "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/vtep/v1"
 	vtepclientset "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/vtep/v1/apis/clientset/versioned"
+	"github.com/ovn-org/ovn-kubernetes/test/e2e/deploymentconfig"
 	"github.com/ovn-org/ovn-kubernetes/test/e2e/images"
 	"github.com/ovn-org/ovn-kubernetes/test/e2e/infraprovider"
 	infraapi "github.com/ovn-org/ovn-kubernetes/test/e2e/infraprovider/api"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/kubernetes/test/e2e/framework"
+	e2ekubectl "k8s.io/kubernetes/test/e2e/framework/kubectl"
 	e2epod "k8s.io/kubernetes/test/e2e/framework/pod"
 	e2epodoutput "k8s.io/kubernetes/test/e2e/framework/pod/output"
 )
@@ -43,6 +47,90 @@ type EVPNServerConfig struct {
 	EVPNVRFConfig
 	// ServerIP is the IP address with prefix for the server, e.g., "10.0.0.100/24"
 	ServerIP string
+}
+
+// EVPNFRRk8sConfig holds configuration for generating an EVPN FRRConfiguration.
+type EVPNFRRk8sConfig struct {
+	// NetworkName is used for the FRRConfiguration name and labels
+	NetworkName string
+	// NeighborIPs are the external FRR container IPs (IPv4 and/or IPv6)
+	NeighborIPs []string
+	// ReceiveNetworks are the networks to receive advertisements from (e.g., agnhost subnets)
+	ReceiveNetworks []string
+	// IPVRFs holds IP-VRF configurations (optional, for Layer 3 EVPN)
+	IPVRFs []templateInputIPVRF
+}
+
+// generateEVPNFRRk8sConfiguration creates an FRRConfiguration with EVPN support.
+// It uses the existing frrconf.yaml.tmpl template with EVPN fields enabled.
+// Returns a temporary directory containing the FRRConfiguration YAML file.
+func generateEVPNFRRk8sConfiguration(cfg EVPNFRRk8sConfig) (directory string, err error) {
+	// parse configuration templates
+	var templates *template.Template
+	templates, err = template.ParseFS(ratestdata, filepath.Join(tmplDir, "frr-k8s", "*.tmpl"))
+	if err != nil {
+		return "", fmt.Errorf("failed to parse templates: %w", err)
+	}
+
+	// create the directory that will hold the configuration files
+	directory, err = os.MkdirTemp("", "frrk8sconf-evpn-")
+	if err != nil {
+		return "", fmt.Errorf("failed to make temp directory: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			os.RemoveAll(directory)
+		}
+	}()
+
+	// Split neighbors and networks by IP family
+	receivesIPv4, receivesIPv6 := splitCIDRStringsByIPFamily(cfg.ReceiveNetworks)
+	neighborsIPv4, neighborsIPv6 := splitIPStringsByIPFamily(cfg.NeighborIPs)
+
+	conf := templateInputFRR{
+		Name:   cfg.NetworkName,
+		Labels: map[string]string{"network": cfg.NetworkName},
+		EVPN:   true,
+		IPVRFs: cfg.IPVRFs,
+		Routers: []templateInputRouter{
+			{
+				NeighborsIPv4: neighborsIPv4,
+				NeighborsIPv6: neighborsIPv6,
+				NetworksIPv4:  receivesIPv4,
+				NetworksIPv6:  receivesIPv6,
+			},
+		},
+	}
+	err = executeFileTemplate(templates, directory, "frrconf.yaml", conf)
+	if err != nil {
+		return "", fmt.Errorf("failed to execute template %q: %w", "frrconf.yaml", err)
+	}
+
+	return directory, nil
+}
+
+// applyEVPNFRRk8sConfiguration generates and applies an EVPN FRRConfiguration,
+// and registers cleanup functions to remove it after the test.
+func applyEVPNFRRk8sConfiguration(ictx infraapi.Context, cfg EVPNFRRk8sConfig) error {
+	frrK8sConfig, err := generateEVPNFRRk8sConfiguration(cfg)
+	if err != nil {
+		return fmt.Errorf("failed to generate EVPN FRR-k8s configuration: %w", err)
+	}
+	ictx.AddCleanUpFn(func() error { return os.RemoveAll(frrK8sConfig) })
+
+	_, err = e2ekubectl.RunKubectl(deploymentconfig.Get().FRRK8sNamespace(), "create", "-f", frrK8sConfig)
+	if err != nil {
+		return fmt.Errorf("failed to apply EVPN FRRConfiguration: %w", err)
+	}
+	ictx.AddCleanUpFn(func() error {
+		_, err = e2ekubectl.RunKubectl(deploymentconfig.Get().FRRK8sNamespace(), "delete", "-f", frrK8sConfig)
+		if err != nil {
+			return fmt.Errorf("failed to delete EVPN FRRConfiguration: %w", err)
+		}
+		return nil
+	})
+
+	return nil
 }
 
 // setupExternalFRRWithEVPNBridge configures the EVPN bridge and VXLAN VTEP on
@@ -723,10 +811,11 @@ func cleanupIPVRFConfig(frr infraapi.ExternalContainer, vrfName string) error {
 // EVPN e2e tests
 var _ = ginkgo.Describe("EVPN: Pod connectivity to external servers via EVPN", func() {
 	const (
-		timeout         = 240 * time.Second
-		netexecPort     = 8080
-		vtepSubnetIPv4  = "100.64.0.0/24"
-		existingFRRName = "frr"
+		timeout              = 240 * time.Second
+		netexecPort          = 8080
+		vtepSubnetIPv4       = "100.64.0.0/24"
+		existingFRRName      = "frr"
+		evpnServerSubnetIPv4 = "172.26.0.0/16" // Subnet used by external agnhost servers
 	)
 	var netexecPortStr = fmt.Sprintf("%d", netexecPort)
 
@@ -867,8 +956,34 @@ var _ = ginkgo.Describe("EVPN: Pod connectivity to external servers via EVPN", f
 			err = createUserDefinedNetwork(f, ictx, f.Namespace, testBaseName, true, networkSpec, networkLabels)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
+			// Create EVPN FRRConfiguration before RouteAdvertisements
+			// This configures frr-k8s to peer with external FRR and enable l2vpn evpn address family
+			ginkgo.By("Creating EVPN FRRConfiguration for frr-k8s")
+			frrNeighborIPs := []string{frrIP}
+			if frrNetIface.IPv6 != "" {
+				frrNeighborIPs = append(frrNeighborIPs, frrNetIface.IPv6)
+			}
+			// Collect IP-VRF configs if any
+			var ipvrfConfigs []templateInputIPVRF
+			if ipvrfCfg != nil {
+				ipvrfConfigs = append(ipvrfConfigs, templateInputIPVRF{
+					VRFName: ipvrfCfg.EVPNVRFConfig.Name,
+					L3VNI:   int(ipvrfCfg.EVPNVRFConfig.VNI),
+					Subnet:  strings.Split(ipvrfCfg.ServerIP, "/")[0] + "/24", // Use /24 for the subnet
+				})
+			}
+			err = applyEVPNFRRk8sConfiguration(ictx, EVPNFRRk8sConfig{
+				NetworkName:     testBaseName,
+				NeighborIPs:     frrNeighborIPs,
+				ReceiveNetworks: []string{evpnServerSubnetIPv4},
+				IPVRFs:          ipvrfConfigs,
+			})
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+
 			ginkgo.By("Creating RouteAdvertisements")
-			err = createRouteAdvertisements(f, ictx, testBaseName, testBaseName, networkLabels, networkLabels)
+			// Use only {network: testBaseName} for frrConfigurationSelector to match the FRRConfiguration we just created
+			frrConfigLabels := map[string]string{"network": testBaseName}
+			err = createRouteAdvertisements(f, ictx, testBaseName, testBaseName, networkLabels, frrConfigLabels)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 			// TEMPORARY: Run external script for cluster-side EVPN setup until OVN-K8s implements it
