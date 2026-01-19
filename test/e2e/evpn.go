@@ -857,6 +857,12 @@ var _ = ginkgo.Describe("EVPN: Pod connectivity to external servers via EVPN", f
 
 			ginkgo.By("Creating CUDN with EVPN transport")
 			networkLabels := map[string]string{"network": testBaseName}
+			if networkSpec.EVPN.MACVRF != nil {
+				networkLabels["macvrf"] = "true"
+			}
+			if networkSpec.EVPN.IPVRF != nil {
+				networkLabels["ipvrf"] = "true"
+			}
 			err = createUserDefinedNetwork(f, ictx, f.Namespace, testBaseName, true, networkSpec, networkLabels)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
