@@ -23,7 +23,6 @@ import (
 	"k8s.io/kubernetes/test/e2e/framework"
 	e2epod "k8s.io/kubernetes/test/e2e/framework/pod"
 	e2epodoutput "k8s.io/kubernetes/test/e2e/framework/pod/output"
-	e2eskipper "k8s.io/kubernetes/test/e2e/framework/skipper"
 )
 
 // EVPNVRFConfig holds configuration for an EVPN VRF (MAC-VRF or IP-VRF) on the external FRR.
@@ -743,9 +742,9 @@ var _ = ginkgo.Describe("EVPN: Pod connectivity to external servers via EVPN", f
 	var configuredIPVRFs []string
 
 	ginkgo.BeforeEach(func() {
-		if !isLocalGWModeEnabled() {
+		/*if !isLocalGWModeEnabled() {
 			e2eskipper.Skipf("EVPN test cases only supported in Local Gateway mode")
-		}
+		}*/
 		ictx = infraprovider.Get().NewTestContext()
 		testBaseName = "evpn-" + framework.RandomSuffix()
 		evpnBridgeCreated = false
