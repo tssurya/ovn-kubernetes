@@ -2,8 +2,10 @@ package e2e
 
 import (
 	"fmt"
+	"net"
 	"strings"
 
+	"github.com/ovn-org/ovn-kubernetes/test/e2e/images"
 	"github.com/ovn-org/ovn-kubernetes/test/e2e/infraprovider"
 	infraapi "github.com/ovn-org/ovn-kubernetes/test/e2e/infraprovider/api"
 	"k8s.io/apimachinery/pkg/util/sets"
@@ -65,6 +67,8 @@ const (
 	// externalFRRContainerName is the name of the external FRR container
 	// created during KIND cluster setup with BGP enabled (./contrib/kind.sh -rae)
 	externalFRRContainerName = "frr"
+	// agnhostHTTPPort is the HTTP port for agnhost netexec
+	agnhostHTTPPort = 8080
 )
 
 // setupEVPNBridgeOnExternalFRR creates the EVPN bridge (br0) and VXLAN device (vxlan0)
@@ -459,4 +463,212 @@ func setupIPVRFBGPOnExternalFRR(ictx infraapi.Context, vrfName string, ipVRFBGPA
 
 	framework.Logf("IP-VRF BGP setup complete on %s (VRF %s, ipVRFBGPASN %d, bgpASN %d, VNI %d, RT %s, families %v)", externalFRRContainerName, vrfName, ipVRFBGPASN, bgpASN, vni, rt, ipFamilies.UnsortedList())
 	return nil
+}
+
+// =============================================================================
+// EVPN Agnhost Utilities
+// =============================================================================
+
+// evpnAgnhostInfo holds the discovered network information for an EVPN agnhost container.
+type evpnAgnhostInfo struct {
+	agnhostIPs       []string
+	agnhostInterface string
+	frrInterface     string
+}
+
+// createEVPNAgnhost creates a Docker network with the given subnets, creates an agnhost
+// container on it, attaches FRR to it, and discovers the assigned IPs and interface names.
+//
+// This is the shared foundation for both MAC-VRF and IP-VRF agnhost setups.
+// The caller is responsible for configuring FRR's interface (e.g., adding it to br0
+// as an access port for MAC-VRF, or putting it in a VRF for IP-VRF).
+//
+// Parameters:
+//   - networkName: Name for the Docker network (e.g., "macvrf-net-100", "ipvrf-net-202")
+//   - containerName: Name for the agnhost container (e.g., "agnhost-macvrf-100")
+//   - ipFamilies: Cluster IP family support, used to filter discovered IPs
+//   - subnets: Subnets for the Docker network (e.g., "10.100.0.0/16" for IPv4, or both for dual-stack)
+func createEVPNAgnhost(ictx infraapi.Context, networkName, containerName string, ipFamilies sets.Set[utilnet.IPFamily], subnets ...string) (*evpnAgnhostInfo, error) {
+	// Step 1: Create Docker network with specific subnet(s)
+	network, err := ictx.CreateNetwork(networkName, subnets...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create network %s: %w", networkName, err)
+	}
+
+	// Step 2: Create agnhost container on that network
+	agnhostContainer := infraapi.ExternalContainer{
+		Name:        containerName,
+		Image:       images.AgnHost(),
+		Network:     network,
+		CmdArgs:     []string{"netexec", fmt.Sprintf("--http-port=%d", agnhostHTTPPort)},
+		RuntimeArgs: []string{"--cap-add=NET_ADMIN"},
+	}
+	_, err = ictx.CreateExternalContainer(agnhostContainer)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create agnhost container %s: %w", containerName, err)
+	}
+
+	// Step 3: Connect FRR to the network
+	_, err = ictx.AttachNetwork(network, externalFRRContainerName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect FRR to network %s: %w", networkName, err)
+	}
+
+	// Step 4: Discover assigned IPs and interface names
+	agnhostNetInf, err := infraprovider.Get().GetExternalContainerNetworkInterface(
+		infraapi.ExternalContainer{Name: containerName}, network)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get agnhost network interface: %w", err)
+	}
+
+	frrNetInf, err := infraprovider.Get().GetExternalContainerNetworkInterface(
+		infraapi.ExternalContainer{Name: externalFRRContainerName}, network)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get FRR network interface: %w", err)
+	}
+
+	frrInterface := frrNetInf.InfName
+	if frrInterface == "" {
+		return nil, fmt.Errorf("FRR interface name not found for network %s", networkName)
+	}
+
+	agnhostInterface := agnhostNetInf.InfName
+	if agnhostInterface == "" {
+		return nil, fmt.Errorf("agnhost interface name not found for network %s", networkName)
+	}
+
+	// Collect agnhost IPs only for cluster-supported address families.
+	// Docker may assign IPs for families we didn't request (e.g., default IPv4 on IPv6-only networks),
+	// so we filter based on what the cluster actually supports.
+	var agnhostIPs []string
+	if ipFamilies.Has(utilnet.IPv4) && agnhostNetInf.IPv4 != "" {
+		agnhostIPs = append(agnhostIPs, agnhostNetInf.IPv4)
+	}
+	if ipFamilies.Has(utilnet.IPv6) && agnhostNetInf.IPv6 != "" {
+		agnhostIPs = append(agnhostIPs, agnhostNetInf.IPv6)
+	}
+
+	framework.Logf("EVPN agnhost created: %s (IPs: %v, interface: %s, FRR interface: %s)", containerName, agnhostIPs, agnhostInterface, frrInterface)
+	return &evpnAgnhostInfo{
+		agnhostIPs:       agnhostIPs,
+		agnhostInterface: agnhostInterface,
+		frrInterface:     frrInterface,
+	}, nil
+}
+
+// =============================================================================
+// MAC-VRF Agnhost Utilities
+// =============================================================================
+
+// secondToLastIP returns the second-to-last usable IP in the given subnet.
+// Using the high end of the range avoids collisions with both OVN IPAM
+// (which allocates from lower end onwards) and Docker IPAM (which allocates from lower end onwards).
+// This assumes OVN-K CUDN IPAM won't allocate IPs from the top of the subnet range
+// for pods in these e2e tests.
+// Example: "10.100.0.0/24" -> 10.100.0.253, "fd00:100::/64" -> fd00:100::ffff:ffff:ffff:fffe
+func secondToLastIP(ipNet *net.IPNet) net.IP {
+	// Compute broadcast: network OR inverted mask
+	broadcast := make(net.IP, len(ipNet.IP))
+	for i := range ipNet.IP {
+		broadcast[i] = ipNet.IP[i] | ^ipNet.Mask[i]
+	}
+	// Subtract 2 from broadcast to get second-to-last usable IP
+	result := make(net.IP, len(broadcast))
+	copy(result, broadcast)
+	borrow := byte(2)
+	for i := len(result) - 1; i >= 0 && borrow > 0; i-- {
+		diff := int(result[i]) - int(borrow)
+		if diff < 0 {
+			result[i] = byte(diff + 256)
+			borrow = 1
+		} else {
+			result[i] = byte(diff)
+			borrow = 0
+		}
+	}
+	return result
+}
+
+// setupMACVRFAgnhost creates an agnhost container connected to the EVPN bridge
+// for MAC-VRF (Layer 2) connectivity testing.
+//
+// This function:
+//  1. Creates a Docker network with the CUDN subnet and an agnhost on it
+//  2. Connects FRR to the network (Docker creates a veth pair automatically)
+//  3. Replaces Docker-assigned IPs on agnhost with the second-to-last IP of the subnet
+//     to avoid collisions with OVN IPAM and Docker IPAM
+//  4. Moves FRR's interface to br0 as an access port for the MAC-VRF VLAN
+//
+// Requires: setupEVPNBridgeOnExternalFRR and setupMACVRFOnExternalFRR must be called first.
+//
+// The agnhost will be on the same L2 segment as pods on the CUDN, allowing
+// direct Layer 2 communication via EVPN Type-2/Type-3 routes.
+//
+// Parameters:
+//   - vid: VLAN ID for the access port on br0 (e.g., 100)
+//   - ipFamilies: Cluster IP family support (e.g., sets.New(utilnet.IPv4, utilnet.IPv6))
+//   - subnets: Subnets for the Docker network matching the CUDN (e.g., "10.100.0.0/16")
+//
+// Returns:
+//   - Agnhost's IP addresses without prefix (e.g., ["10.100.0.253"] for a /24 subnet)
+func setupMACVRFAgnhost(ictx infraapi.Context, vid int, ipFamilies sets.Set[utilnet.IPFamily], subnets ...string) ([]string, error) {
+	networkName := fmt.Sprintf("macvrf-net-%d", vid)
+	containerName := fmt.Sprintf("agnhost-macvrf-%d", vid)
+
+	info, err := createEVPNAgnhost(ictx, networkName, containerName, ipFamilies, subnets...)
+	if err != nil {
+		return nil, err
+	}
+
+	// Replace Docker-assigned IPs with the second-to-last IP of the subnet.
+	// Docker and OVN IPAM both allocate from the low end of the subnet,
+	// so using the high end avoids collisions on the shared L2 segment.
+	// We use targeted "ip addr del" (not flush) to preserve IPv6 link-local addresses
+	// needed for NDP on the L2 segment.
+	agnhost := infraapi.ExternalContainer{Name: containerName}
+
+	var ipCmds []string
+	var agnhostIPs []string
+	for _, subnet := range subnets {
+		_, ipNet, err := net.ParseCIDR(subnet)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse subnet %s: %w", subnet, err)
+		}
+		ones, _ := ipNet.Mask.Size()
+		// Delete the Docker-assigned IP that falls within this subnet
+		for _, dockerIP := range info.agnhostIPs {
+			if ipNet.Contains(net.ParseIP(dockerIP)) {
+				ipCmds = append(ipCmds, fmt.Sprintf("ip addr del %s/%d dev %s", dockerIP, ones, info.agnhostInterface))
+				break
+			}
+		}
+		// Add the second-to-last usable IP of the subnet
+		newIP := secondToLastIP(ipNet)
+		ipCmds = append(ipCmds, fmt.Sprintf("ip addr add %s/%d dev %s", newIP, ones, info.agnhostInterface))
+		agnhostIPs = append(agnhostIPs, newIP.String())
+	}
+
+	if len(ipCmds) > 0 {
+		combined := strings.Join(ipCmds, " && ")
+		if _, err := infraprovider.Get().ExecExternalContainerCommand(agnhost, []string{"sh", "-c", combined}); err != nil {
+			return nil, fmt.Errorf("failed to replace Docker IPs on agnhost: %w", err)
+		}
+	}
+
+	// Move FRR's interface to br0 and configure as access port
+	frr := infraapi.ExternalContainer{Name: externalFRRContainerName}
+	vidStr := fmt.Sprintf("%d", vid)
+	frrCmd := fmt.Sprintf("ip link set %s master br0 && bridge vlan add dev %s vid %s pvid untagged",
+		info.frrInterface, info.frrInterface, vidStr)
+	if _, err = infraprovider.Get().ExecExternalContainerCommand(frr, []string{"sh", "-c", frrCmd}); err != nil {
+		return nil, fmt.Errorf("failed to configure %s as br0 access port for VID %s: %w", info.frrInterface, vidStr, err)
+	}
+
+	// Cleanup is handled automatically:
+	// - ictx.CreateNetwork() registers network deletion
+	// - ictx.CreateExternalContainer() registers container deletion
+	// - ictx.AttachNetwork() registers network detachment
+
+	framework.Logf("MAC-VRF agnhost setup complete: %s (IPs: %v, VID: %d, FRR interface: %s)", containerName, agnhostIPs, vid, info.frrInterface)
+	return agnhostIPs, nil
 }
