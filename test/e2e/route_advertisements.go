@@ -2759,6 +2759,7 @@ const (
 	cudn                  networkType = "CUDN"
 	cudnAdvertised        networkType = "CUDN_ADVERTISED"
 	cudnAdvertisedVRFLite networkType = "CUDN_ADVERTISED_VRFLITE"
+	cudnAdvertisedEVPN    networkType = "CUDN_ADVERTISED_EVPN"
 )
 
 // createNamespaceWithPrimaryNetworkOfType helper function configures a
@@ -2780,7 +2781,7 @@ func createNamespaceWithPrimaryNetworkOfType(
 	case cudnAdvertised:
 		networkLabels = map[string]string{"advertise": name}
 		frrConfigurationLabels = map[string]string{"name": "receive-all"}
-	case cudnAdvertisedVRFLite:
+	case cudnAdvertisedVRFLite, cudnAdvertisedEVPN:
 		targetVRF = name
 		networkLabels = map[string]string{"advertise": name}
 		frrConfigurationLabels = map[string]string{"network": name}
