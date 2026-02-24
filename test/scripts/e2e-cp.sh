@@ -161,6 +161,10 @@ if [[ "${WHAT}" = "$SERIAL_LABEL" ]]; then
   shift # don't "focus" on Serial since we filter by label
 fi
 
+if [ "$ENABLE_EVPN" != true ]; then
+  skip_label "Feature:EVPN"
+fi
+
 if [ "$ENABLE_ROUTE_ADVERTISEMENTS" != true ]; then
   skip_label "Feature:RouteAdvertisements"
 else
