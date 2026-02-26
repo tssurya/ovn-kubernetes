@@ -215,17 +215,12 @@ func setupMACVRFOnExternalFRR(vni, vid int) error {
 	vidStr := fmt.Sprintf("%d", vid)
 	vniStr := fmt.Sprintf("%d", vni)
 
-	cmd := fmt.Sprintf(
-		// Add VLAN to bridge
-		"bridge vlan add dev br0 vid %s self && "+
-			// Add VLAN to vxlan0
-			"bridge vlan add dev vxlan0 vid %s && "+
-			// Add VNI to vxlan0
-			"bridge vni add dev vxlan0 vni %s && "+
-			// Map VLAN to VNI (tunnel_info)
-			"bridge vlan add dev vxlan0 vid %s tunnel_info id %s",
-		vidStr, vidStr, vniStr, vidStr, vniStr)
-	_, err := infraprovider.Get().ExecExternalContainerCommand(frr, []string{"sh", "-c", cmd})
+	_, err := infraprovider.Get().ExecExternalContainerCommand(frr, shellChain(
+		fmt.Sprintf("bridge vlan add dev br0 vid %s self", vidStr),
+		fmt.Sprintf("bridge vlan add dev vxlan0 vid %s", vidStr),
+		fmt.Sprintf("bridge vni add dev vxlan0 vni %s", vniStr),
+		fmt.Sprintf("bridge vlan add dev vxlan0 vid %s tunnel_info id %s", vidStr, vniStr),
+	))
 	if err != nil {
 		return fmt.Errorf("failed to setup MAC-VRF (VNI %d, VID %d): %w", vni, vid, err)
 	}
@@ -325,6 +320,18 @@ func setupIPVRFOnExternalFRR(ictx infraapi.Context, vrfName string, vni, vid int
 
 	framework.Logf("IP-VRF setup complete on %s (VRF %s, VNI %d, VID %d)", externalFRRContainerName, vrfName, vni, vid)
 	return nil
+}
+
+// shellChain builds a command that chains multiple shell commands with &&.
+// Each command is passed as a positional parameter to sh and executed via eval,
+// ensuring correct argument parsing regardless of how the infra provider
+// executes the command (docker exec, podman exec, SSH, etc.).
+func shellChain(cmds ...string) []string {
+	var evals []string
+	for i := range cmds {
+		evals = append(evals, fmt.Sprintf("eval \"$%d\"", i+1))
+	}
+	return append([]string{"sh", "-c", strings.Join(evals, " && "), "_"}, cmds...)
 }
 
 // vtyshCommand builds a shell command that invokes vtysh with single-quoted -c arguments.
@@ -683,8 +690,7 @@ func setupMACVRFAgnhost(ictx infraapi.Context, vid int, ipFamilies sets.Set[util
 	}
 
 	if len(ipCmds) > 0 {
-		combined := strings.Join(ipCmds, " && ")
-		if _, err := infraprovider.Get().ExecExternalContainerCommand(agnhost, []string{"sh", "-c", combined}); err != nil {
+		if _, err := infraprovider.Get().ExecExternalContainerCommand(agnhost, shellChain(ipCmds...)); err != nil {
 			return nil, fmt.Errorf("failed to replace Docker IPs on agnhost: %w", err)
 		}
 	}
@@ -692,9 +698,10 @@ func setupMACVRFAgnhost(ictx infraapi.Context, vid int, ipFamilies sets.Set[util
 	// Move FRR's interface to br0 and configure as access port
 	frr := infraapi.ExternalContainer{Name: externalFRRContainerName}
 	vidStr := fmt.Sprintf("%d", vid)
-	frrCmd := fmt.Sprintf("ip link set %s master br0 && bridge vlan add dev %s vid %s pvid untagged",
-		info.frrInterface, info.frrInterface, vidStr)
-	if _, err = infraprovider.Get().ExecExternalContainerCommand(frr, []string{"sh", "-c", frrCmd}); err != nil {
+	if _, err = infraprovider.Get().ExecExternalContainerCommand(frr, shellChain(
+		fmt.Sprintf("ip link set %s master br0", info.frrInterface),
+		fmt.Sprintf("bridge vlan add dev %s vid %s pvid untagged", info.frrInterface, vidStr),
+	)); err != nil {
 		return nil, fmt.Errorf("failed to configure %s as br0 access port for VID %s: %w", info.frrInterface, vidStr, err)
 	}
 
@@ -752,8 +759,10 @@ func setupIPVRFAgnhost(ictx infraapi.Context, vid int, vrfName string, ipFamilie
 	// to preserve IPv6 addresses during VRF assignment. See https://github.com/FRRouting/frr/issues/1666
 	frr := infraapi.ExternalContainer{Name: externalFRRContainerName}
 
-	frrCmd := fmt.Sprintf("ip link set %s master %s && ip link set %s up", info.frrInterface, vrfName, info.frrInterface)
-	if _, err = infraprovider.Get().ExecExternalContainerCommand(frr, []string{"sh", "-c", frrCmd}); err != nil {
+	if _, err = infraprovider.Get().ExecExternalContainerCommand(frr, shellChain(
+		fmt.Sprintf("ip link set %s master %s", info.frrInterface, vrfName),
+		fmt.Sprintf("ip link set %s up", info.frrInterface),
+	)); err != nil {
 		return nil, fmt.Errorf("failed to assign %s to VRF %s: %w", info.frrInterface, vrfName, err)
 	}
 
@@ -769,8 +778,7 @@ func setupIPVRFAgnhost(ictx infraapi.Context, vid int, vrfName string, ipFamilie
 		routeCmds = append(routeCmds, fmt.Sprintf("ip %sroute replace default via %s dev %s", family, gwIP, info.agnhostInterface))
 	}
 	if len(routeCmds) > 0 {
-		combined := strings.Join(routeCmds, " && ")
-		if _, err = infraprovider.Get().ExecExternalContainerCommand(agnhost, []string{"sh", "-c", combined}); err != nil {
+		if _, err = infraprovider.Get().ExecExternalContainerCommand(agnhost, shellChain(routeCmds...)); err != nil {
 			return nil, fmt.Errorf("failed to set default routes on agnhost: %w", err)
 		}
 	}
