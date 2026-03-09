@@ -1185,7 +1185,8 @@ var _ = ginkgo.Describe("EVPN", func() {
 
 		// Generate random subnets for parallel test isolation
 		ipVRFAgnhostIPv4, ipVRFAgnhostIPv6 := randomIPVRFAgnhostSubnets()
-		vtepIPv4, vtepIPv6 := randomVTEPSubnets()
+		// dualstack and ipv6 vteps are not supported by FRR for EVPN transport.
+		vtepIPv4, _ := randomVTEPSubnets()
 
 		// Configure subnets based on cluster IP family support
 		if ipFamilies.Has(utilnet.IPv4) {
@@ -1194,7 +1195,6 @@ var _ = ginkgo.Describe("EVPN", func() {
 		}
 		if ipFamilies.Has(utilnet.IPv6) {
 			ipVRFAgnhostSubnets = append(ipVRFAgnhostSubnets, ipVRFAgnhostIPv6)
-			vtepSubnets = append(vtepSubnets, vtepIPv6)
 		}
 
 		// Discover external FRR IP
