@@ -31,7 +31,7 @@ type RouteAdvertisementsSpecApplyConfiguration struct {
 	// targetVRF determines which VRF the routes should be advertised in.
 	TargetVRF *string `json:"targetVRF,omitempty"`
 	// networkSelectors determines which network routes should be advertised.
-	// Only ClusterUserDefinedNetworks and the default network can be selected.
+	// DefaultNetwork, ClusterUserDefinedNetworks and PrimaryUserDefinedNetworks can be selected.
 	NetworkSelectors *types.NetworkSelectors `json:"networkSelectors,omitempty"`
 	// nodeSelector limits the advertisements to selected nodes. This field
 	// follows standard label selector semantics.

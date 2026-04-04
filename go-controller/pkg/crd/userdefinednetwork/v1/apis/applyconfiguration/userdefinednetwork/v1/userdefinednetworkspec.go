@@ -36,6 +36,13 @@ type UserDefinedNetworkSpecApplyConfiguration struct {
 	Layer3 *Layer3ConfigApplyConfiguration `json:"layer3,omitempty"`
 	// Layer2 is the Layer2 topology configuration.
 	Layer2 *Layer2ConfigApplyConfiguration `json:"layer2,omitempty"`
+	// Transport describes the transport technology for pod-to-pod traffic.
+	// Allowed values are "NoOverlay" and "EVPN".
+	// When omitted, the network uses the default OVN overlay transport.
+	Transport *userdefinednetworkv1.TransportOption `json:"transport,omitempty"`
+	// EVPN contains configuration for EVPN mode.
+	// This is only allowed when Transport is "EVPN".
+	EVPN *EVPNConfigApplyConfiguration `json:"evpn,omitempty"`
 }
 
 // UserDefinedNetworkSpecApplyConfiguration constructs a declarative configuration of the UserDefinedNetworkSpec type for use with
@@ -65,5 +72,21 @@ func (b *UserDefinedNetworkSpecApplyConfiguration) WithLayer3(value *Layer3Confi
 // If called multiple times, the Layer2 field is set to the value of the last call.
 func (b *UserDefinedNetworkSpecApplyConfiguration) WithLayer2(value *Layer2ConfigApplyConfiguration) *UserDefinedNetworkSpecApplyConfiguration {
 	b.Layer2 = value
+	return b
+}
+
+// WithTransport sets the Transport field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the Transport field is set to the value of the last call.
+func (b *UserDefinedNetworkSpecApplyConfiguration) WithTransport(value userdefinednetworkv1.TransportOption) *UserDefinedNetworkSpecApplyConfiguration {
+	b.Transport = &value
+	return b
+}
+
+// WithEVPN sets the EVPN field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the EVPN field is set to the value of the last call.
+func (b *UserDefinedNetworkSpecApplyConfiguration) WithEVPN(value *EVPNConfigApplyConfiguration) *UserDefinedNetworkSpecApplyConfiguration {
+	b.EVPN = value
 	return b
 }

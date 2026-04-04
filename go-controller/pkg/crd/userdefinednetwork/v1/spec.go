@@ -18,13 +18,11 @@ func (s *UserDefinedNetworkSpec) GetLocalnet() *LocalnetConfig {
 }
 
 func (s *UserDefinedNetworkSpec) GetTransport() TransportOption {
-	// UDN (namespace-scoped) does not support transport customization
-	return ""
+	return s.Transport
 }
 
 func (s *UserDefinedNetworkSpec) GetEVPN() *EVPNConfig {
-	// UDN (namespace-scoped) does not support EVPN
-	return nil
+	return s.EVPN
 }
 
 func (s *NetworkSpec) GetTopology() NetworkTopology {

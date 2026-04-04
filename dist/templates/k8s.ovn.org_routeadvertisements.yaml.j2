@@ -111,7 +111,7 @@ spec:
               networkSelectors:
                 description: |-
                   networkSelectors determines which network routes should be advertised.
-                  Only ClusterUserDefinedNetworks and the default network can be selected.
+                  DefaultNetwork, ClusterUserDefinedNetworks and PrimaryUserDefinedNetworks can be selected.
                 items:
                   description: NetworkSelector selects a set of networks.
                   properties:
@@ -547,9 +547,11 @@ spec:
                 can't be specified as it needs to be advertised on all nodes
               rule: (!has(self.nodeSelector.matchLabels) && !has(self.nodeSelector.matchExpressions))
                 || !('PodNetwork' in self.advertisements)
-            - message: Only DefaultNetwork or ClusterUserDefinedNetworks can be selected
+            - message: Only DefaultNetwork, ClusterUserDefinedNetworks or PrimaryUserDefinedNetworks
+                can be selected
               rule: '!self.networkSelectors.exists(i, i.networkSelectionType != ''DefaultNetwork''
-                && i.networkSelectionType != ''ClusterUserDefinedNetworks'')'
+                && i.networkSelectionType != ''ClusterUserDefinedNetworks'' && i.networkSelectionType
+                != ''PrimaryUserDefinedNetworks'')'
           status:
             description: |-
               RouteAdvertisementsStatus defines the observed state of RouteAdvertisements.

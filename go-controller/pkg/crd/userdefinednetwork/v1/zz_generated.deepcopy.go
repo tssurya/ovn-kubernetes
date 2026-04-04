@@ -480,6 +480,11 @@ func (in *UserDefinedNetworkSpec) DeepCopyInto(out *UserDefinedNetworkSpec) {
 		*out = new(Layer2Config)
 		(*in).DeepCopyInto(*out)
 	}
+	if in.EVPN != nil {
+		in, out := &in.EVPN, &out.EVPN
+		*out = new(EVPNConfig)
+		(*in).DeepCopyInto(*out)
+	}
 	return
 }
 

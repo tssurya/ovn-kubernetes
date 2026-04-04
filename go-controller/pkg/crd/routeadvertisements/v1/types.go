@@ -26,14 +26,14 @@ type RouteAdvertisements struct {
 
 // RouteAdvertisementsSpec defines the desired state of RouteAdvertisements
 // +kubebuilder:validation:XValidation:rule="(!has(self.nodeSelector.matchLabels) && !has(self.nodeSelector.matchExpressions)) || !('PodNetwork' in self.advertisements)",message="If 'PodNetwork' is selected for advertisement, a 'nodeSelector' can't be specified as it needs to be advertised on all nodes"
-// +kubebuilder:validation:XValidation:rule="!self.networkSelectors.exists(i, i.networkSelectionType != 'DefaultNetwork' && i.networkSelectionType != 'ClusterUserDefinedNetworks')",message="Only DefaultNetwork or ClusterUserDefinedNetworks can be selected"
+// +kubebuilder:validation:XValidation:rule="!self.networkSelectors.exists(i, i.networkSelectionType != 'DefaultNetwork' && i.networkSelectionType != 'ClusterUserDefinedNetworks' && i.networkSelectionType != 'PrimaryUserDefinedNetworks')",message="Only DefaultNetwork, ClusterUserDefinedNetworks or PrimaryUserDefinedNetworks can be selected"
 type RouteAdvertisementsSpec struct {
 	// targetVRF determines which VRF the routes should be advertised in.
 	// +kubebuilder:validation:Optional
 	TargetVRF string `json:"targetVRF,omitempty"`
 
 	// networkSelectors determines which network routes should be advertised.
-	// Only ClusterUserDefinedNetworks and the default network can be selected.
+	// DefaultNetwork, ClusterUserDefinedNetworks and PrimaryUserDefinedNetworks can be selected.
 	// +kubebuilder:validation:Required
 	NetworkSelectors types.NetworkSelectors `json:"networkSelectors"`
 

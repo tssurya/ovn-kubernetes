@@ -45,6 +45,18 @@ type UserDefinedNetworkSpec struct {
 	// Layer2 is the Layer2 topology configuration.
 	// +optional
 	Layer2 *Layer2Config `json:"layer2,omitempty"`
+
+	// Transport describes the transport technology for pod-to-pod traffic.
+	// Allowed values are "NoOverlay" and "EVPN".
+	// When omitted, the network uses the default OVN overlay transport.
+	// +kubebuilder:validation:Enum=NoOverlay;EVPN
+	// +optional
+	Transport TransportOption `json:"transport,omitempty"`
+
+	// EVPN contains configuration for EVPN mode.
+	// This is only allowed when Transport is "EVPN".
+	// +optional
+	EVPN *EVPNConfig `json:"evpn,omitempty"`
 }
 
 // UserDefinedNetworkStatus contains the observed status of the UserDefinedNetwork.
