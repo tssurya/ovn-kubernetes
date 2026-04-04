@@ -1,0 +1,58 @@
+{
+  "name": "ovn-vpc-console-plugin",
+  "version": "0.0.1",
+  "description": "OpenShift Console plugin for managing OVN-Kubernetes VPCs",
+  "private": true,
+  "license": "Apache-2.0",
+  "scripts": {
+    "clean": "rm -rf dist",
+    "build": "yarn clean && NODE_ENV=production yarn webpack",
+    "build-dev": "yarn clean && yarn webpack",
+    "start": "yarn webpack serve --progress",
+    "start-console": "./start-console-kind.sh",
+    "webpack": "node -r ts-node/register ./node_modules/.bin/webpack"
+  },
+  "devDependencies": {
+    "@babel/core": "^7.29.0",
+    "@babel/preset-env": "^7.29.0",
+    "@openshift-console/dynamic-plugin-sdk": "4.21-latest",
+    "@openshift-console/dynamic-plugin-sdk-webpack": "4.21-latest",
+    "@patternfly/react-core": "^6.2.2",
+    "@patternfly/react-icons": "^6.2.2",
+    "@patternfly/react-table": "^6.2.2",
+    "@types/node": "^22.0.0",
+    "@types/react": "^17.0.37",
+    "@types/react-router-dom": "^5.3.3",
+    "babel-loader": "^10.1.0",
+    "copy-webpack-plugin": "^14.0.0",
+    "css-loader": "^7.1.4",
+    "react": "^17.0.1",
+    "react-dom": "^17.0.1",
+    "react-router": "5.3.x",
+    "react-router-dom": "5.3.x",
+    "style-loader": "^4.0.0",
+    "ts-loader": "^9.5.4",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.9.3",
+    "webpack": "^5.100.0",
+    "webpack-cli": "^6.0.1",
+    "webpack-dev-server": "^5.2.3"
+  },
+  "consolePlugin": {
+    "name": "ovn-vpc-console-plugin",
+    "version": "0.0.1",
+    "displayName": "OVN VPC Manager",
+    "description": "Manage OVN-Kubernetes Virtual Private Clouds from the OpenShift console.",
+    "exposedModules": {
+      "VPCListPage": "./components/VPCListPage",
+      "VPCDetailPage": "./components/VPCDetailPage",
+      "CreateVPCPage": "./components/CreateVPCPage",
+      "UDNListPage": "./components/UDNListPage",
+      "RAListPage": "./components/RAListPage"
+    },
+    "dependencies": {
+      "@console/pluginAPI": "^4.21.0"
+    }
+  },
+  "packageManager": "yarn@4.13.0"
+}

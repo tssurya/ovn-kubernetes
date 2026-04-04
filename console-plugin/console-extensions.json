@@ -1,0 +1,95 @@
+[
+  {
+    "type": "console.model/metadata",
+    "properties": {
+      "model": {
+        "group": "k8s.ovn.org",
+        "version": "v1beta1",
+        "kind": "VPC"
+      },
+      "badge": "tech",
+      "color": "#0066CC",
+      "label": "VPC",
+      "labelPlural": "VPCs",
+      "abbr": "VPC"
+    }
+  },
+  {
+    "type": "console.navigation/section",
+    "properties": {
+      "id": "vpc-networking",
+      "name": "VPC Networking",
+      "perspective": "admin"
+    }
+  },
+  {
+    "type": "console.navigation/href",
+    "properties": {
+      "id": "vpcs",
+      "name": "VPCs",
+      "href": "/k8s/cluster/vpcs",
+      "perspective": "admin",
+      "section": "vpc-networking"
+    }
+  },
+  {
+    "type": "console.navigation/href",
+    "properties": {
+      "id": "udns",
+      "name": "UserDefinedNetworks",
+      "href": "/k8s/cluster/udns",
+      "perspective": "admin",
+      "section": "vpc-networking"
+    }
+  },
+  {
+    "type": "console.navigation/href",
+    "properties": {
+      "id": "routeadvertisements",
+      "name": "RouteAdvertisements",
+      "href": "/k8s/cluster/routeadvertisements",
+      "perspective": "admin",
+      "section": "vpc-networking"
+    }
+  },
+  {
+    "type": "console.page/route",
+    "properties": {
+      "exact": true,
+      "path": "/k8s/cluster/vpcs",
+      "component": { "$codeRef": "VPCListPage" }
+    }
+  },
+  {
+    "type": "console.page/route",
+    "properties": {
+      "exact": true,
+      "path": "/k8s/cluster/vpcs/~new",
+      "component": { "$codeRef": "CreateVPCPage" }
+    }
+  },
+  {
+    "type": "console.page/route",
+    "properties": {
+      "exact": false,
+      "path": "/k8s/cluster/vpcs/:name",
+      "component": { "$codeRef": "VPCDetailPage" }
+    }
+  },
+  {
+    "type": "console.page/route",
+    "properties": {
+      "exact": true,
+      "path": "/k8s/cluster/udns",
+      "component": { "$codeRef": "UDNListPage" }
+    }
+  },
+  {
+    "type": "console.page/route",
+    "properties": {
+      "exact": true,
+      "path": "/k8s/cluster/routeadvertisements",
+      "component": { "$codeRef": "RAListPage" }
+    }
+  }
+]
