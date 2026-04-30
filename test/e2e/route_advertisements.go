@@ -1944,7 +1944,7 @@ var _ = ginkgo.Describe("BGP: For BGP configured networks", feature.RouteAdverti
 				),
 			).To(gomega.Succeed())
 			servers = append(servers, agnhostName)
-		case cudnAdvertisedEVPN, cudnAdvertisedEVPNRandomVTEP:
+		case cudnAdvertisedEVPN, cudnAdvertisedEVPNRandomVTEP, cudnAdvertisedEVPNOverlapping:
 			ginkgo.By("Running a EVPN network with an agnhost server")
 			ipVRFAgnhostIPv4, ipVRFAgnhostIPv6 := randomIPVRFAgnhostSubnets()
 			ipVRFAgnhostSubnets := []string{ipVRFAgnhostIPv4, ipVRFAgnhostIPv6}
@@ -1985,6 +1985,7 @@ var _ = ginkgo.Describe("BGP: For BGP configured networks", feature.RouteAdverti
 					macVRFNetworkName,
 					ipVRFAgnhostName,
 					ipVRFNetworkName,
+					networkType == cudnAdvertisedEVPNOverlapping,
 				),
 			).To(gomega.Succeed())
 			if networkSpec.EVPN.MACVRF != nil {
@@ -2235,6 +2236,7 @@ var _ = ginkgo.Describe("BGP: For BGP configured networks", feature.RouteAdverti
 		func(testedNetworkType networkType, networkSpecGen func() *udnv1.NetworkSpec) {
 			var testNamespace *corev1.Namespace
 			var testPod *corev1.Pod
+			var testNetworkSpec *udnv1.NetworkSpec
 
 			getSameNode := func() string {
 				return testPod.Spec.NodeName
@@ -2260,6 +2262,7 @@ var _ = ginkgo.Describe("BGP: For BGP configured networks", feature.RouteAdverti
 				case networkSpec.Layer2 != nil:
 					networkSpec.Layer2.Subnets = matchL2SubnetsByIPFamilies(ipFamilySet, networkSpec.Layer2.Subnets...)
 				}
+				testNetworkSpec = networkSpec
 
 				testNamespace, externalServers = configureNetworkWithInfra(
 					f,
@@ -2523,6 +2526,55 @@ var _ = ginkgo.Describe("BGP: For BGP configured networks", feature.RouteAdverti
 						return nil
 					}
 
+					// Overlapping specGens: reuse the tested network's CUDN subnets
+					// with fresh VNIs, proving VPN-level isolation with overlapping
+					// IP address space. Returns nil when the tested network's
+					// topology doesn't match (the cross-product produces
+					// combinations like L2-tested × L3-overlapping which are
+					// skipped below).
+					overlappingL3IPVRFSpecGen := func() *udnv1.NetworkSpec {
+						if testNetworkSpec.Layer3 == nil {
+							return nil
+						}
+						subnets := make([]udnv1.Layer3Subnet, len(testNetworkSpec.Layer3.Subnets))
+						copy(subnets, testNetworkSpec.Layer3.Subnets)
+						return &udnv1.NetworkSpec{
+							Topology:  udnv1.NetworkTopologyLayer3,
+							Layer3:    &udnv1.Layer3Config{Role: udnv1.NetworkRolePrimary, Subnets: subnets},
+							Transport: udnv1.TransportOptionEVPN,
+							EVPN:      &udnv1.EVPNConfig{IPVRF: &udnv1.VRFConfig{VNI: randomVNI()}},
+						}
+					}
+					overlappingL2MACVRFSpecGen := func() *udnv1.NetworkSpec {
+						if testNetworkSpec.Layer2 == nil {
+							return nil
+						}
+						subnets := make(udnv1.DualStackCIDRs, len(testNetworkSpec.Layer2.Subnets))
+						copy(subnets, testNetworkSpec.Layer2.Subnets)
+						return &udnv1.NetworkSpec{
+							Topology:  udnv1.NetworkTopologyLayer2,
+							Layer2:    &udnv1.Layer2Config{Role: udnv1.NetworkRolePrimary, Subnets: subnets},
+							Transport: udnv1.TransportOptionEVPN,
+							EVPN:      &udnv1.EVPNConfig{MACVRF: &udnv1.VRFConfig{VNI: randomVNI()}},
+						}
+					}
+					overlappingL2MACVRFIPVRFSpecGen := func() *udnv1.NetworkSpec {
+						if testNetworkSpec.Layer2 == nil {
+							return nil
+						}
+						subnets := make(udnv1.DualStackCIDRs, len(testNetworkSpec.Layer2.Subnets))
+						copy(subnets, testNetworkSpec.Layer2.Subnets)
+						return &udnv1.NetworkSpec{
+							Topology:  udnv1.NetworkTopologyLayer2,
+							Layer2:    &udnv1.Layer2Config{Role: udnv1.NetworkRolePrimary, Subnets: subnets},
+							Transport: udnv1.TransportOptionEVPN,
+							EVPN: &udnv1.EVPNConfig{
+								MACVRF: &udnv1.VRFConfig{VNI: randomVNI()},
+								IPVRF:  &udnv1.VRFConfig{VNI: randomVNI()},
+							},
+						}
+					}
+
 					otherNetworksToTest := []ginkgo.TableEntry{
 						ginkgo.Entry("Default", defaultNetwork, nilNetworkSpecGen),
 						ginkgo.Entry("Layer 3 CUDN VRF-Lite", cudnAdvertisedVRFLite, layer3NetworkSpecGen),
@@ -2537,6 +2589,9 @@ var _ = ginkgo.Describe("BGP: For BGP configured networks", feature.RouteAdverti
 						ginkgo.Entry("Layer 3 CUDN EVPN IP-VRF random VTEP", feature.EVPN, cudnAdvertisedEVPNRandomVTEP, layer3IPVRFNetworkSpecGen),
 						ginkgo.Entry("Layer 2 CUDN EVPN MAC-VRF random VTEP", feature.EVPN, cudnAdvertisedEVPNRandomVTEP, layer2MACVRFNetworkSpecGen),
 						ginkgo.Entry("Layer 2 CUDN EVPN MAC-VRF and IP-VRF random VTEP", feature.EVPN, cudnAdvertisedEVPNRandomVTEP, layer2MACVRFIPVRFNetworkSpecGen),
+						ginkgo.Entry("Layer 3 CUDN EVPN IP-VRF overlapping subnet", feature.EVPN, cudnAdvertisedEVPNOverlapping, overlappingL3IPVRFSpecGen),
+						ginkgo.Entry("Layer 2 CUDN EVPN MAC-VRF overlapping subnet", feature.EVPN, cudnAdvertisedEVPNOverlapping, overlappingL2MACVRFSpecGen),
+						ginkgo.Entry("Layer 2 CUDN EVPN MAC-VRF and IP-VRF overlapping subnet", feature.EVPN, cudnAdvertisedEVPNOverlapping, overlappingL2MACVRFIPVRFSpecGen),
 					}
 
 					ginkgo.DescribeTableSubtree("Of type",
@@ -2550,8 +2605,10 @@ var _ = ginkgo.Describe("BGP: For BGP configured networks", feature.RouteAdverti
 
 								otherNetworkSpec := otherNetworkSpecGen()
 								switch {
-								case otherNetworkSpec == nil:
+								case otherNetworkSpec == nil && networkType == defaultNetwork:
 									otherNetworkName = "default"
+								case otherNetworkSpec == nil:
+									e2eskipper.Skipf("Overlapping topology mismatch: tested network is not the expected topology for this entry")
 								case otherNetworkSpec.Layer3 != nil:
 									otherNetworkSpec.Layer3.Subnets = matchL3SubnetsByIPFamilies(ipFamilySet, otherNetworkSpec.Layer3.Subnets...)
 								case otherNetworkSpec.Layer2 != nil:
@@ -2642,7 +2699,24 @@ var _ = ginkgo.Describe("BGP: For BGP configured networks", feature.RouteAdverti
 											)
 											gomega.Expect(err).NotTo(gomega.HaveOccurred())
 											gomega.Expect(otherPodIP).ToNot(gomega.BeEmpty())
-											testPodToClientIPNOK(testPod, otherPodIP)
+											testPodIP, err := getPodAnnotationIPsForPrimaryNetworkByIPFamily(
+												f.ClientSet,
+												testPod.Namespace,
+												testPod.Name,
+												testNetworkName,
+												family,
+											)
+											gomega.Expect(err).NotTo(gomega.HaveOccurred())
+											if testPodIP == otherPodIP {
+												// Overlapping CUDNs assigned the same IP; a direct
+												// unreachability test is meaningless. Instead verify
+												// the tested pod reaches itself (its own hostname),
+												// proving traffic stays within its own CUDN.
+												framework.Logf("Tested pod and other pod share IP %s; verifying hostname to confirm per-CUDN isolation", otherPodIP)
+												testPodToHostnameAndExpect(testPod, otherPodIP, testPod.Name)
+											} else {
+												testPodToClientIPNOK(testPod, otherPodIP)
+											}
 										},
 									)
 								}
@@ -2663,7 +2737,20 @@ var _ = ginkgo.Describe("BGP: For BGP configured networks", feature.RouteAdverti
 											)
 											gomega.Expect(err).NotTo(gomega.HaveOccurred())
 											gomega.Expect(testPodIP).ToNot(gomega.BeEmpty())
-											testPodToClientIPNOK(source, testPodIP)
+											sourcePodIP, err := getPodAnnotationIPsForPrimaryNetworkByIPFamily(
+												f.ClientSet,
+												source.Namespace,
+												source.Name,
+												otherNetworkName,
+												family,
+											)
+											gomega.Expect(err).NotTo(gomega.HaveOccurred())
+											if sourcePodIP == testPodIP {
+												framework.Logf("Other pod %s and tested pod share IP %s; verifying hostname to confirm per-CUDN isolation", source.Name, testPodIP)
+												testPodToHostnameAndExpect(source, testPodIP, source.Name)
+											} else {
+												testPodToClientIPNOK(source, testPodIP)
+											}
 										},
 									)
 								}
@@ -3000,7 +3087,8 @@ const (
 	cudnAdvertised               networkType = "CUDN_ADVERTISED"
 	cudnAdvertisedVRFLite        networkType = "CUDN_ADVERTISED_VRFLITE"
 	cudnAdvertisedEVPN           networkType = "CUDN_ADVERTISED_EVPN"
-	cudnAdvertisedEVPNRandomVTEP networkType = "CUDN_ADVERTISED_EVPN_RANDOM_VTEP"
+	cudnAdvertisedEVPNRandomVTEP  networkType = "CUDN_ADVERTISED_EVPN_RANDOM_VTEP"
+	cudnAdvertisedEVPNOverlapping networkType = "CUDN_ADVERTISED_EVPN_OVERLAPPING"
 )
 
 // createNamespaceWithPrimaryNetworkOfType helper function configures a
@@ -3023,7 +3111,7 @@ func createNamespaceWithPrimaryNetworkOfType(
 	case cudnAdvertised:
 		networkLabels = map[string]string{"advertise": networkName}
 		frrConfigurationLabels = map[string]string{"name": "receive-all"}
-	case cudnAdvertisedVRFLite, cudnAdvertisedEVPN, cudnAdvertisedEVPNRandomVTEP:
+	case cudnAdvertisedVRFLite, cudnAdvertisedEVPN, cudnAdvertisedEVPNRandomVTEP, cudnAdvertisedEVPNOverlapping:
 		targetVRF = networkName
 		networkLabels = map[string]string{"advertise": networkName}
 		frrConfigurationLabels = map[string]string{"network": networkName}

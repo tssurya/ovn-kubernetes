@@ -657,8 +657,11 @@ func getMACVRFAgnhostIPsFromSubnets(subnets []string) ([]string, error) {
 //   - vid: VLAN ID for the access port on br0 (e.g., 100)
 //   - ipFamilies: Cluster IP family support (e.g., sets.New(utilnet.IPv4, utilnet.IPv6))
 //   - subnets: Subnets for the Docker network matching the CUDN (e.g., "10.100.0.0/16")
-func setupMACVRFAgnhost(ictx infraapi.Context, containerName, networkName, bridgeName string, vid int, ipFamilies sets.Set[utilnet.IPFamily], subnets []string) error {
-	// Derive agnhost IPs from CUDN subnets
+//   - useProxyDockerNetwork: When true, the Docker network is created without explicit
+//     subnets (letting Docker auto-select), and the container's IPs are reconfigured
+//     afterward to match the CUDN subnets. This is needed when two MAC-VRF agnhosts
+//     share the same CUDN subnet because Docker rejects overlapping subnets.
+func setupMACVRFAgnhost(ictx infraapi.Context, containerName, networkName, bridgeName string, vid int, ipFamilies sets.Set[utilnet.IPFamily], subnets []string, useProxyDockerNetwork bool) error {
 	agnhostIPs, err := getMACVRFAgnhostIPsFromSubnets(subnets)
 	if err != nil {
 		return fmt.Errorf("Failed to derive MAC-VRF agnhost IPs from subnets: %w", err)
@@ -673,9 +676,37 @@ func setupMACVRFAgnhost(ictx infraapi.Context, containerName, networkName, bridg
 		ip6 = ips6[0]
 	}
 
-	info, err := createEVPNAgnhost(ictx, networkName, containerName, ipFamilies, subnets, ip4, ip6)
+	networkSubnets := subnets
+	requestIP4, requestIP6 := ip4, ip6
+	if useProxyDockerNetwork {
+		networkSubnets = nil
+		requestIP4, requestIP6 = "", ""
+	}
+
+	info, err := createEVPNAgnhost(ictx, networkName, containerName, ipFamilies, networkSubnets, requestIP4, requestIP6)
 	if err != nil {
 		return err
+	}
+
+	if useProxyDockerNetwork {
+		container := infraapi.ExternalContainer{Name: containerName}
+		if _, err := infraprovider.Get().ExecExternalContainerCommand(container,
+			[]string{"ip", "addr", "flush", "dev", info.agnhostInterface}); err != nil {
+			return fmt.Errorf("failed to flush Docker IPs on %s: %w", containerName, err)
+		}
+		for i, subnet := range subnets {
+			_, ipNet, parseErr := net.ParseCIDR(subnet)
+			if parseErr != nil {
+				return fmt.Errorf("failed to parse CUDN subnet %s: %w", subnet, parseErr)
+			}
+			prefixLen, _ := ipNet.Mask.Size()
+			addr := fmt.Sprintf("%s/%d", agnhostIPs[i], prefixLen)
+			if _, err := infraprovider.Get().ExecExternalContainerCommand(container,
+				[]string{"ip", "addr", "add", addr, "dev", info.agnhostInterface}); err != nil {
+				return fmt.Errorf("failed to add CUDN IP %s on %s: %w", addr, containerName, err)
+			}
+		}
+		framework.Logf("Reconfigured %s IPs from proxy Docker network to CUDN IPs: %v", containerName, agnhostIPs)
 	}
 
 	// Move FRR's interface to bridgeName and configure as access port
@@ -1245,6 +1276,7 @@ func runEVPNNetworkAndServers(
 	macVRFNetworkName string,
 	ipVRFAgnhostName string,
 	ipVRFNetworkName string,
+	macVRFUseProxyDockerNetwork bool,
 ) error {
 	// Derive what to setup from networkSpec
 	hasMACVRF := networkSpec.EVPN != nil && networkSpec.EVPN.MACVRF != nil
@@ -1291,7 +1323,7 @@ func runEVPNNetworkAndServers(
 		}
 
 		framework.Logf("Creating MAC-VRF agnhost")
-		err = setupMACVRFAgnhost(ictx, macVRFAgnhostName, macVRFNetworkName, bridgeName, macVRFVID, ipFamilySet, cudnSubnetsFromSpec)
+		err = setupMACVRFAgnhost(ictx, macVRFAgnhostName, macVRFNetworkName, bridgeName, macVRFVID, ipFamilySet, cudnSubnetsFromSpec, macVRFUseProxyDockerNetwork)
 		if err != nil {
 			return err
 		}
