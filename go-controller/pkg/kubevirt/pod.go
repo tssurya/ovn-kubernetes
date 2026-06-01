@@ -808,3 +808,4 @@ func newRouterAdvertisementWithPrefixInfos(ip net.IP, destinationMAC net.Hardwar
 		PrefixInfos:    prefixInfos,
 	}
 }
+
