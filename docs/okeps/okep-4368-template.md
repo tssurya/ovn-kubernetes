@@ -18,6 +18,10 @@ hard)
 
 (Bullet list of Primary goals of this proposal.)
 
+## Future Goals
+
+(Bullet list of Future goals of this proposal.)
+
 ## Non-Goals
 
 (Bullet list of What is explicitly out of scope for this proposal.)
@@ -90,6 +94,15 @@ to get started with this feature
 * when you open an OKEP PR; you must also edit
 https://github.com/ovn-kubernetes/ovn-kubernetes/blob/13c333afc21e89aec3cfcaa89260f72383497707/mkdocs.yml#L135
 to include the path to your new OKEP (i.e Feature Title: okeps/<filename.md>)
+
+## Performance and Scale
+
+(Analyze the performance and scale implications of this feature.
+Consider: CPU/memory overhead, additional OVN DB objects at scale,
+watch/reconciliation costs, caching vs recomputation tradeoffs.
+Describe behavior at hundreds of nodes with thousands of pods.
+Address networking edge impact if relevant — BUM traffic flooding,
+ARP storms, broadcast domain growth.)
 
 ## Risks, Known Limitations and Mitigations
 
