@@ -1,5 +1,10 @@
 [
   {
+    "version": "cut-1.2",
+    "title": "cut-1.2 (Stable)",
+    "aliases": []
+  },
+  {
     "version": "1.1",
     "title": "1.1 (Legacy)",
     "aliases": []
