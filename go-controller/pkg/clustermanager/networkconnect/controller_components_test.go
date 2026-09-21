@@ -34,6 +34,7 @@ import (
 	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/factory"
 	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/networkmanager"
 	ovntest "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/testing"
+	mocknetinfo "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util/mocks/multinetwork"
 	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/types"
 	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
 )
@@ -2788,6 +2789,69 @@ func TestController_initialSync(t *testing.T) {
 							"owner %s: IPv6 subnet should match exactly", expected.owner)
 					}
 				}
+			}
+		})
+	}
+}
+
+func TestDetectTransport(t *testing.T) {
+	newNet := func(transport string) util.NetInfo {
+		m := mocknetinfo.NewNetInfo(t)
+		m.On("Transport").Return(transport)
+		return m
+	}
+
+	tests := []struct {
+		name        string
+		networks    []util.NetInfo
+		want        string
+		wantErr     bool
+	}{
+		{
+			name:    "empty — no networks yet",
+			want:    "",
+			wantErr: false,
+		},
+		{
+			name:    "single Geneve network",
+			networks: []util.NetInfo{newNet("")},
+			want:    "",
+			wantErr: false,
+		},
+		{
+			name:    "single EVPN network",
+			networks: []util.NetInfo{newNet(types.NetworkTransportEVPN)},
+			want:    types.NetworkTransportEVPN,
+			wantErr: false,
+		},
+		{
+			name:    "two EVPN networks",
+			networks: []util.NetInfo{newNet(types.NetworkTransportEVPN), newNet(types.NetworkTransportEVPN)},
+			want:    types.NetworkTransportEVPN,
+			wantErr: false,
+		},
+		{
+			name:    "mixed Geneve+EVPN",
+			networks: []util.NetInfo{newNet(""), newNet(types.NetworkTransportEVPN)},
+			wantErr: true,
+		},
+		{
+			name:    "no-overlay is skipped",
+			networks: []util.NetInfo{newNet(types.NetworkTransportNoOverlay), newNet(types.NetworkTransportEVPN)},
+			want:    types.NetworkTransportEVPN,
+			wantErr: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			g := gomega.NewWithT(t)
+			got, err := detectTransport(tc.networks)
+			if tc.wantErr {
+				g.Expect(err).To(gomega.HaveOccurred())
+			} else {
+				g.Expect(err).NotTo(gomega.HaveOccurred())
+				g.Expect(got).To(gomega.Equal(tc.want))
 			}
 		})
 	}

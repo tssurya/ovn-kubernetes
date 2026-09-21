@@ -61,12 +61,12 @@ type clusterNetworkConnectState struct {
 	// since NAD object itself will be nil since its deleted, we need
 	// to keep track of NAD keys.
 	selectedNADs sets.Set[string]
-	// set of networks currently selected by this CNC's network selectors
+	// set of networks currently selected by this CNC's network selectors (Geneve transport only)
 	// {value: network owner key like "layer3_1" or "layer2_2"}
 	// Owner keys are computed from topology type (layer3 or layer2) and network ID, enabling subnet release
 	// without needing to re-discover network info.
 	selectedNetworks sets.Set[string]
-	// tunnelID for this CNC's connect router
+	// tunnelID for this CNC's connect router (Geneve transport only)
 	tunnelID int
 }
 

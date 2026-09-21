@@ -150,9 +150,11 @@ func (c *Controller) syncClusterNetworkConnect(cncName string, cnc *networkconne
 		// when the cache entry is deleted below since it's self-contained per-CNC
 		// Annotations also don't need to be removed since object is already deleted.
 		if cncExists {
-			// Release tunnel key
-			c.tunnelKeysAllocator.ReleaseKeys(cncName)
-			klog.V(4).Infof("Released tunnel key for deleted CNC %s", cncName)
+			// Release tunnel key — only allocated for Geneve CNCs
+			if cncState.tunnelID != 0 {
+				c.tunnelKeysAllocator.ReleaseKeys(cncName)
+				klog.V(4).Infof("Released tunnel key for deleted CNC %s", cncName)
+			}
 		}
 
 		// Clean up the cache
@@ -167,19 +169,23 @@ func (c *Controller) syncClusterNetworkConnect(cncName string, cnc *networkconne
 			selectedNADs:     sets.New[string](),
 			selectedNetworks: sets.New[string](),
 		}
-		connectSubnetAllocator, err := NewHybridConnectSubnetAllocator(cnc.Spec.ConnectSubnets, cncName)
-		if err != nil {
-			return fmt.Errorf("failed to initialize subnet allocator for CNC %s: %w", cncName, err)
+		// Subnet allocator and connectSubnets are only used for Geneve-transport CNCs.
+		// EVPN CNCs use evpnConfiguration instead and have no connectSubnets.
+		if len(cnc.Spec.ConnectSubnets) > 0 {
+			connectSubnetAllocator, err := NewHybridConnectSubnetAllocator(cnc.Spec.ConnectSubnets, cncName)
+			if err != nil {
+				return fmt.Errorf("failed to initialize subnet allocator for CNC %s: %w", cncName, err)
+			}
+			connectSubnets := []*net.IPNet{}
+			for _, cs := range cnc.Spec.ConnectSubnets {
+				// ignore error, this was already parsed for NewHybridConnectSubnetAllocator
+				_, cidr, _ := net.ParseCIDR(string(cs.CIDR))
+				connectSubnets = append(connectSubnets, cidr)
+			}
+			cncState.connectSubnets = connectSubnets
+			cncState.allocator = connectSubnetAllocator
+			klog.V(5).Infof("Initialized subnet allocator for CNC %s", cncName)
 		}
-		connectSubnets := []*net.IPNet{}
-		for _, cs := range cnc.Spec.ConnectSubnets {
-			// ignore error, this was already parsed for NewHybridConnectSubnetAllocator
-			_, cidr, _ := net.ParseCIDR(string(cs.CIDR))
-			connectSubnets = append(connectSubnets, cidr)
-		}
-		cncState.connectSubnets = connectSubnets
-		cncState.allocator = connectSubnetAllocator
-		klog.V(5).Infof("Initialized subnet allocator for CNC %s", cncName)
 		c.cncCache[cnc.Name] = cncState
 	}
 
@@ -191,7 +197,29 @@ func (c *Controller) syncClusterNetworkConnect(cncName string, cnc *networkconne
 	if err != nil {
 		errs = append(errs, fmt.Errorf("failed to discover selected networks for CNC %s: %w", cncName, err))
 	}
-	// STEP2: Validate the CNC
+
+	// STEP2: Detect transport type and branch.
+	// detectTransport errors on mixed Geneve+EVPN selection. Return immediately: the CNC is
+	// fundamentally misconfigured and no further reconciliation (allocation, validation) is
+	// meaningful until the user fixes the network selector.
+	// no-overlay networks are already rejected and absent from discoveredNetworks so they never
+	// influence transport detection.
+	transport, err := detectTransport(discoveredNetworks)
+	if err != nil {
+		return fmt.Errorf("CNC %s: %w", cncName, err)
+	}
+
+	if transport == ovntypes.NetworkTransportEVPN {
+		// EVPN path: no connect-router, no connectSubnets allocation.
+		// Just track which NADs are selected; selectedNetworks stays empty (no owner keys for EVPN).
+		cncState.selectedNADs = allMatchingNADKeys
+		klog.V(5).Infof("CNC %s: EVPN transport, selected %d NADs", cncName, allMatchingNADKeys.Len())
+		return kerrors.NewAggregate(errs)
+	}
+
+	// Geneve path below.
+
+	// STEP3 (Geneve): Validate the CNC
 	if err = validateCNC(cncState, discoveredNetworks); err != nil {
 		return fmt.Errorf("validation failed for CNC %s: %w", cncName, err)
 	}
@@ -199,7 +227,7 @@ func (c *Controller) syncClusterNetworkConnect(cncName string, cnc *networkconne
 		return fmt.Errorf("cross-validation failed for CNC %s: %w", cncName, err)
 	}
 
-	// STEP3: Generate a tunnelID for the connect router corresponding to this CNC
+	// STEP4 (Geneve): Generate a tunnelID for the connect router corresponding to this CNC
 	// passing a value greater than 4096 as networkID - actually we don't need this value,
 	// but it's required by the allocator to ensure that the prederministic tunnel keys
 	// that are derived from the networkID are not reused for backwards compatibility reasons.
@@ -217,7 +245,7 @@ func (c *Controller) syncClusterNetworkConnect(cncName string, cnc *networkconne
 		cncState.tunnelID = tunnelID[0]
 	}
 
-	// STEP4: Generate or release subnets of size CNC.Spec.ConnectSubnets.NetworkPrefix for each layer3 network
+	// STEP5 (Geneve): Generate or release subnets of size CNC.Spec.ConnectSubnets.NetworkPrefix for each layer3 network
 	//  and /31 or /127 subnets for each layer2 network
 	// We intentionally don't compute or use the networksNeedingAllocation set here because we want to return all
 	// currently allocated subnets for each owner back to the annotation update step.
@@ -255,6 +283,33 @@ func (c *Controller) syncClusterNetworkConnect(cncName string, cnc *networkconne
 	cncState.selectedNetworks = allMatchingNetworkKeys
 	klog.V(5).Infof("Updated selectedNetworks cache for CNC %s with %d networks", cncName, allMatchingNetworkKeys.Len())
 	return kerrors.NewAggregate(errs)
+}
+
+// detectTransport inspects discovered networks and returns the single transport type in use.
+// Returns an error if networks use mixed transports (e.g. some Geneve, some EVPN).
+// Returns empty string when no networks have been discovered yet.
+func detectTransport(networks []util.NetInfo) (string, error) {
+	var (
+		detected string
+		seen     bool
+	)
+	for _, network := range networks {
+		t := network.Transport()
+		if t == ovntypes.NetworkTransportNoOverlay {
+			// no-overlay is rejected in discoverSelectedNetworks; skip defensively
+			continue
+		}
+		if !seen {
+			detected = t
+			seen = true
+			continue
+		}
+		if detected != t {
+			return "", fmt.Errorf("%w: CNC selects networks with mixed transport types (%s and %s); all selected networks must use the same transport",
+				errConfig, detected, t)
+		}
+	}
+	return detected, nil
 }
 
 // validateCNC performs validation checks for the given CNC connectNetworks and discovered networks.
@@ -387,7 +442,7 @@ func (c *Controller) discoverSelectedNetworks(cnc *networkconnectv1.ClusterNetwo
 				if !network.IsPrimaryNetwork() {
 					continue
 				}
-				if network.Transport() == ovntypes.NetworkTransportNoOverlay || network.Transport() == ovntypes.NetworkTransportEVPN {
+				if network.Transport() == ovntypes.NetworkTransportNoOverlay {
 					errs = append(errs, fmt.Errorf("network %s has transport type %s that is not supported for networkConnect",
 						network.GetNetworkName(), network.Transport()))
 					continue
