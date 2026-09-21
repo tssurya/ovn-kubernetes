@@ -31,6 +31,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 
+	networkconnectv1 "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/clusternetworkconnect/v1"
 	egressipv1 "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/egressip/v1"
 	uplinkv1alpha1 "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/uplink/v1alpha1"
 )
@@ -52,6 +53,7 @@ var _ = BeforeSuite(func() {
 	scheme := k8sruntime.NewScheme()
 	utilruntime.Must(egressipv1.AddToScheme(scheme))
 	utilruntime.Must(uplinkv1alpha1.AddToScheme(scheme))
+	utilruntime.Must(networkconnectv1.AddToScheme(scheme))
 
 	testEnv = &envtest.Environment{
 		CRDDirectoryPaths: []string{crdDir()},
