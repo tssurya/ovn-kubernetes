@@ -27,6 +27,8 @@ func ForKind(kind schema.GroupVersionKind) interface{} {
 		return &clusternetworkconnectv1.ClusterNetworkConnectStatusApplyConfiguration{}
 	case v1.SchemeGroupVersion.WithKind("ConnectSubnet"):
 		return &clusternetworkconnectv1.ConnectSubnetApplyConfiguration{}
+	case v1.SchemeGroupVersion.WithKind("EVPNCNCConfig"):
+		return &clusternetworkconnectv1.EVPNCNCConfigApplyConfiguration{}
 
 	}
 	return nil

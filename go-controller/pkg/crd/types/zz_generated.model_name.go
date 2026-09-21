@@ -32,3 +32,8 @@ func (in PrimaryUserDefinedNetworkSelector) OpenAPIModelName() string {
 func (in SecondaryUserDefinedNetworkSelector) OpenAPIModelName() string {
 	return "com.github.ovn-kubernetes.ovn-kubernetes.go-controller.pkg.crd.types.SecondaryUserDefinedNetworkSelector"
 }
+
+// OpenAPIModelName returns the OpenAPI model name for this type.
+func (in VRFConfig) OpenAPIModelName() string {
+	return "com.github.ovn-kubernetes.ovn-kubernetes.go-controller.pkg.crd.types.VRFConfig"
+}

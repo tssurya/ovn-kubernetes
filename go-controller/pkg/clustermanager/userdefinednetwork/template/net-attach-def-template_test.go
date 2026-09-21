@@ -15,6 +15,7 @@ import (
 
 	ovncnitypes "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/cni/types"
 	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/config"
+	apitypes "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/types"
 	udnv1 "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/userdefinednetwork/v1"
 	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/types"
 	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
@@ -732,7 +733,7 @@ var _ = Describe("NetAttachDefTemplate", func() {
 				Transport: udnv1.TransportOptionEVPN,
 				EVPN: &udnv1.EVPNConfig{
 					VTEP: "my-vtep",
-					MACVRF: &udnv1.VRFConfig{
+					MACVRF: &apitypes.VRFConfig{
 						VNI:         100,
 						RouteTarget: "65000:100",
 					},
@@ -772,7 +773,7 @@ var _ = Describe("NetAttachDefTemplate", func() {
 				Transport: udnv1.TransportOptionEVPN,
 				EVPN: &udnv1.EVPNConfig{
 					VTEP: "my-vtep",
-					IPVRF: &udnv1.VRFConfig{
+					IPVRF: &apitypes.VRFConfig{
 						VNI:         200,
 						RouteTarget: "65000:200",
 					},
@@ -809,11 +810,11 @@ var _ = Describe("NetAttachDefTemplate", func() {
 				Transport: udnv1.TransportOptionEVPN,
 				EVPN: &udnv1.EVPNConfig{
 					VTEP: "my-vtep",
-					MACVRF: &udnv1.VRFConfig{
+					MACVRF: &apitypes.VRFConfig{
 						VNI:         100,
 						RouteTarget: "100000:100", // 4-byte ASN format
 					},
-					IPVRF: &udnv1.VRFConfig{
+					IPVRF: &apitypes.VRFConfig{
 						VNI:         200,
 						RouteTarget: "192.168.1.1:200", // IPv4 format
 					},
@@ -855,7 +856,7 @@ var _ = Describe("NetAttachDefTemplate", func() {
 				Transport: udnv1.TransportOptionEVPN,
 				EVPN: &udnv1.EVPNConfig{
 					VTEP: "my-vtep",
-					MACVRF: &udnv1.VRFConfig{
+					MACVRF: &apitypes.VRFConfig{
 						VNI: 100,
 						// RouteTarget intentionally omitted
 					},
@@ -926,11 +927,11 @@ var _ = Describe("NetAttachDefTemplate", func() {
 						Transport: udnv1.TransportOptionEVPN,
 						EVPN: &udnv1.EVPNConfig{
 							VTEP: "my-vtep",
-							MACVRF: &udnv1.VRFConfig{
+							MACVRF: &apitypes.VRFConfig{
 								VNI:         100,
 								RouteTarget: "65000:100",
 							},
-							IPVRF: &udnv1.VRFConfig{
+							IPVRF: &apitypes.VRFConfig{
 								VNI:         200,
 								RouteTarget: "65000:200",
 							},
@@ -967,7 +968,7 @@ var _ = Describe("NetAttachDefTemplate", func() {
 						Transport: udnv1.TransportOptionEVPN,
 						EVPN: &udnv1.EVPNConfig{
 							VTEP: "my-vtep",
-							MACVRF: &udnv1.VRFConfig{
+							MACVRF: &apitypes.VRFConfig{
 								VNI:         100,
 								RouteTarget: "65000:100",
 							},
@@ -1006,7 +1007,7 @@ var _ = Describe("NetAttachDefTemplate", func() {
 						Transport: udnv1.TransportOptionEVPN,
 						EVPN: &udnv1.EVPNConfig{
 							VTEP: "my-vtep",
-							MACVRF: &udnv1.VRFConfig{
+							MACVRF: &apitypes.VRFConfig{
 								VNI: 100,
 								// RouteTarget intentionally omitted (empty)
 							},
@@ -1071,7 +1072,7 @@ var _ = Describe("NetAttachDefTemplate", func() {
 						Transport: udnv1.TransportOptionEVPN,
 						EVPN: &udnv1.EVPNConfig{
 							VTEP: "my-vtep",
-							MACVRF: &udnv1.VRFConfig{
+							MACVRF: &apitypes.VRFConfig{
 								VNI:         100,
 								RouteTarget: "65000:100",
 							},

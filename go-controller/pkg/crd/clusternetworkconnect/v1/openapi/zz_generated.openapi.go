@@ -27,11 +27,13 @@ func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenA
 		v1.ClusterNetworkConnectSpec{}.OpenAPIModelName():                 schema_pkg_crd_clusternetworkconnect_v1_ClusterNetworkConnectSpec(ref),
 		v1.ClusterNetworkConnectStatus{}.OpenAPIModelName():               schema_pkg_crd_clusternetworkconnect_v1_ClusterNetworkConnectStatus(ref),
 		v1.ConnectSubnet{}.OpenAPIModelName():                             schema_pkg_crd_clusternetworkconnect_v1_ConnectSubnet(ref),
+		v1.EVPNCNCConfig{}.OpenAPIModelName():                             schema_pkg_crd_clusternetworkconnect_v1_EVPNCNCConfig(ref),
 		types.ClusterUserDefinedNetworkSelector{}.OpenAPIModelName():      schema_go_controller_pkg_crd_types_ClusterUserDefinedNetworkSelector(ref),
 		types.NetworkAttachmentDefinitionSelector{}.OpenAPIModelName():    schema_go_controller_pkg_crd_types_NetworkAttachmentDefinitionSelector(ref),
 		types.NetworkSelector{}.OpenAPIModelName():                        schema_go_controller_pkg_crd_types_NetworkSelector(ref),
 		types.PrimaryUserDefinedNetworkSelector{}.OpenAPIModelName():      schema_go_controller_pkg_crd_types_PrimaryUserDefinedNetworkSelector(ref),
 		types.SecondaryUserDefinedNetworkSelector{}.OpenAPIModelName():    schema_go_controller_pkg_crd_types_SecondaryUserDefinedNetworkSelector(ref),
+		types.VRFConfig{}.OpenAPIModelName():                              schema_go_controller_pkg_crd_types_VRFConfig(ref),
 		networkingv1.HTTPIngressPath{}.OpenAPIModelName():                 schema_k8sio_api_networking_v1_HTTPIngressPath(ref),
 		networkingv1.HTTPIngressRuleValue{}.OpenAPIModelName():            schema_k8sio_api_networking_v1_HTTPIngressRuleValue(ref),
 		networkingv1.IPAddress{}.OpenAPIModelName():                       schema_k8sio_api_networking_v1_IPAddress(ref),
@@ -248,7 +250,7 @@ func schema_pkg_crd_clusternetworkconnect_v1_ClusterNetworkConnectSpec(ref commo
 							},
 						},
 						SchemaProps: spec.SchemaProps{
-							Description: "connectSubnets specifies the subnets used for interconnecting the selected networks. This creates a shared subnet space that connected networks can use to communicate. Can have at most 1 CIDR for each IP family (IPv4 and IPv6). Must not overlap with:\n any of the pod subnets used by the selected networks.\n any of the transit subnets used by the selected networks.\n any of the service CIDR range used in the cluster.\n any of the join subnet of the selected networks to be connected.\n any of the masquerade subnet range used in the cluster.\n any of the node subnets chosen by the platform.\n any of other connect subnets for other ClusterNetworkConnects that might be selecting same networks.\n\nDoes not have a default value for the above reason so that user takes care in setting non-overlapping subnets.",
+							Description: "connectSubnets specifies the subnets used for interconnecting the selected networks. This creates a shared subnet space that connected networks can use to communicate. Can have at most 1 CIDR for each IP family (IPv4 and IPv6). Must not overlap with:\n any of the pod subnets used by the selected networks.\n any of the transit subnets used by the selected networks.\n any of the service CIDR range used in the cluster.\n any of the join subnet of the selected networks to be connected.\n any of the masquerade subnet range used in the cluster.\n any of the node subnets chosen by the platform.\n any of other connect subnets for other ClusterNetworkConnects that might be selecting same networks.\n\nDoes not have a default value for the above reason so that user takes care in setting non-overlapping subnets. Required when evpnConfiguration is not set (Geneve transport). Forbidden when evpnConfiguration is set (EVPN transport).",
 							Type:        []string{"array"},
 							Items: &spec.SchemaOrArray{
 								Schema: &spec.Schema{
@@ -278,12 +280,18 @@ func schema_pkg_crd_clusternetworkconnect_v1_ClusterNetworkConnectSpec(ref commo
 							},
 						},
 					},
+					"evpnConfiguration": {
+						SchemaProps: spec.SchemaProps{
+							Description: "evpnConfiguration configures the parent VRF for connecting EVPN-based CUDNs. Required when the selected CUDNs use EVPN transport. Forbidden when selected CUDNs use Geneve transport (use connectSubnets instead).",
+							Ref:         ref(v1.EVPNCNCConfig{}.OpenAPIModelName()),
+						},
+					},
 				},
-				Required: []string{"networkSelectors", "connectSubnets", "connectivity"},
+				Required: []string{"networkSelectors", "connectivity"},
 			},
 		},
 		Dependencies: []string{
-			v1.ConnectSubnet{}.OpenAPIModelName(), types.NetworkSelector{}.OpenAPIModelName()},
+			v1.ConnectSubnet{}.OpenAPIModelName(), v1.EVPNCNCConfig{}.OpenAPIModelName(), types.NetworkSelector{}.OpenAPIModelName()},
 	}
 }
 
@@ -358,6 +366,29 @@ func schema_pkg_crd_clusternetworkconnect_v1_ConnectSubnet(ref common.ReferenceC
 				Required: []string{"cidr", "networkPrefix"},
 			},
 		},
+	}
+}
+
+func schema_pkg_crd_clusternetworkconnect_v1_EVPNCNCConfig(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "EVPNCNCConfig configures the parent VRF created by a CNC to connect EVPN-based CUDNs. The parent VRF acts as the L3 routing hub: it owns a single L3 VNI and imports routes from each connected CUDN's per-CUDN VRF via FRR's `import vrf` directive.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"ipVRF": {
+						SchemaProps: spec.SchemaProps{
+							Description: "ipVRF configures the parent VRF's L3 VNI and optional route target. The VNI must be unique across all EVPN VNIs in the cluster (both CUDN VNIs and other CNC parent VRF VNIs). If routeTarget is not specified, it is auto-generated as \"<ASN>:<VNI>\".",
+							Default:     map[string]interface{}{},
+							Ref:         ref(types.VRFConfig{}.OpenAPIModelName()),
+						},
+					},
+				},
+				Required: []string{"ipVRF"},
+			},
+		},
+		Dependencies: []string{
+			types.VRFConfig{}.OpenAPIModelName()},
 	}
 }
 
@@ -512,6 +543,35 @@ func schema_go_controller_pkg_crd_types_SecondaryUserDefinedNetworkSelector(ref 
 		},
 		Dependencies: []string{
 			metav1.LabelSelector{}.OpenAPIModelName()},
+	}
+}
+
+func schema_go_controller_pkg_crd_types_VRFConfig(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "VRFConfig contains configuration for a VRF in EVPN.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"vni": {
+						SchemaProps: spec.SchemaProps{
+							Description: "VNI is the Virtual Network Identifier for this VRF. VNI is a 24-bit field in the VXLAN header (RFC 7348), allowing values from 1 to 16777215. but in the future this could be having different limit for other dataplane implementations. Must be unique across all EVPN configurations in the cluster.",
+							Default:     0,
+							Type:        []string{"integer"},
+							Format:      "int32",
+						},
+					},
+					"routeTarget": {
+						SchemaProps: spec.SchemaProps{
+							Description: "RouteTarget is the import/export route target for this VRF. If not specified, it will be auto-generated as \"<AS (Autonomous System)>:<VNI (Virtual Network Identifier)>\". Auto-generation will use 2-byte AS if VNI > 65535, since 4-byte AS/IPv4 only allows 2-byte local admin.\n\nFollows FRR EVPN L3 Route-Target format (A.B.C.D:MN|EF:OPQR|GHJK:MN|*:OPQR|*:MN):\n  - EF:OPQR   = 2-byte AS (1-65535) : local admin (4 bytes, 1-4294967295)\n  - GHJK:MN   = 4-byte AS (65536-4294967295) : local admin (2 bytes, 1-65535)\n  - A.B.C.D:MN = IPv4 address : local admin (2 bytes, 1-65535)\n  - *:OPQR    = wildcard AS : local admin (4 bytes, 1-4294967295) - for import matching\n  - *:MN      = wildcard AS : local admin (2 bytes, 1-65535) - for import matching\n\nThe 6-byte value constraint (RFC 4360) means AS size + local admin size = 6 bytes.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+				},
+				Required: []string{"vni"},
+			},
+		},
 	}
 }
 

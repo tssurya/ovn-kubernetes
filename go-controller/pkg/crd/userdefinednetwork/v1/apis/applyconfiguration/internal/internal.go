@@ -26,6 +26,16 @@ func Parser() *typed.Parser {
 var parserOnce sync.Once
 var parser *typed.Parser
 var schemaYAML = typed.YAMLObject(`types:
+- name: com.github.ovn-kubernetes.ovn-kubernetes.go-controller.pkg.crd.types.VRFConfig
+  map:
+    fields:
+    - name: routeTarget
+      type:
+        scalar: string
+    - name: vni
+      type:
+        scalar: numeric
+      default: 0
 - name: com.github.ovn-kubernetes.ovn-kubernetes.go-controller.pkg.crd.userdefinednetwork.v1.AccessVLANConfig
   map:
     fields:
@@ -90,10 +100,10 @@ var schemaYAML = typed.YAMLObject(`types:
     fields:
     - name: ipVRF
       type:
-        namedType: com.github.ovn-kubernetes.ovn-kubernetes.go-controller.pkg.crd.userdefinednetwork.v1.VRFConfig
+        namedType: com.github.ovn-kubernetes.ovn-kubernetes.go-controller.pkg.crd.types.VRFConfig
     - name: macVRF
       type:
-        namedType: com.github.ovn-kubernetes.ovn-kubernetes.go-controller.pkg.crd.userdefinednetwork.v1.VRFConfig
+        namedType: com.github.ovn-kubernetes.ovn-kubernetes.go-controller.pkg.crd.types.VRFConfig
     - name: vtep
       type:
         scalar: string
@@ -334,16 +344,6 @@ var schemaYAML = typed.YAMLObject(`types:
       fields:
       - fieldName: access
         discriminatorValue: Access
-- name: com.github.ovn-kubernetes.ovn-kubernetes.go-controller.pkg.crd.userdefinednetwork.v1.VRFConfig
-  map:
-    fields:
-    - name: routeTarget
-      type:
-        scalar: string
-    - name: vni
-      type:
-        scalar: numeric
-      default: 0
 - name: io.k8s.apimachinery.pkg.apis.meta.v1.Condition
   map:
     fields:

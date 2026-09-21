@@ -750,7 +750,7 @@ var _ = Describe("User Defined Network Controller", func() {
 			It("should allocate VID for EVPN network NAD", func() {
 				testNs := testNamespace("evpn-test")
 				vtep := testVTEP("vtep-test")
-				cudn := testEVPNClusterUDN("evpn-cudn", &udnv1.EVPNConfig{VTEP: vtep.Name, MACVRF: &udnv1.VRFConfig{VNI: 100}}, testNs.Name)
+				cudn := testEVPNClusterUDN("evpn-cudn", &udnv1.EVPNConfig{VTEP: vtep.Name, MACVRF: &apitypes.VRFConfig{VNI: 100}}, testNs.Name)
 
 				c = newTestControllerWithNetworkManager(template.RenderNetAttachDefManifest, cudn, testNs, vtep)
 				Expect(c.Run()).To(Succeed())
@@ -839,8 +839,8 @@ var _ = Describe("User Defined Network Controller", func() {
 			It("should allocate different VIDs for multiple EVPN networks", func() {
 				testNs := testNamespace("evpn-multi-test")
 				vtep := testVTEP("vtep-test")
-				cudn1 := testEVPNClusterUDN("evpn-cudn-1", &udnv1.EVPNConfig{VTEP: vtep.Name, MACVRF: &udnv1.VRFConfig{VNI: 100}}, testNs.Name)
-				cudn2 := testEVPNClusterUDN("evpn-cudn-2", &udnv1.EVPNConfig{VTEP: vtep.Name, MACVRF: &udnv1.VRFConfig{VNI: 300}}, testNs.Name)
+				cudn1 := testEVPNClusterUDN("evpn-cudn-1", &udnv1.EVPNConfig{VTEP: vtep.Name, MACVRF: &apitypes.VRFConfig{VNI: 100}}, testNs.Name)
+				cudn2 := testEVPNClusterUDN("evpn-cudn-2", &udnv1.EVPNConfig{VTEP: vtep.Name, MACVRF: &apitypes.VRFConfig{VNI: 300}}, testNs.Name)
 				cudn2.UID = "2" // Different UID for second CUDN
 
 				c = newTestControllerWithNetworkManager(template.RenderNetAttachDefManifest, cudn1, cudn2, testNs, vtep)
@@ -865,8 +865,8 @@ var _ = Describe("User Defined Network Controller", func() {
 			It("should reject EVPN network with duplicate VNI on the same VTEP", func() {
 				testNs := testNamespace("evpn-vni-conflict-test")
 				vtep := testVTEP("vtep-test")
-				cudn1 := testEVPNClusterUDN("evpn-vni-1", &udnv1.EVPNConfig{VTEP: vtep.Name, MACVRF: &udnv1.VRFConfig{VNI: 100}}, testNs.Name)
-				cudn2 := testEVPNClusterUDN("evpn-vni-2", &udnv1.EVPNConfig{VTEP: vtep.Name, MACVRF: &udnv1.VRFConfig{VNI: 100}}, testNs.Name)
+				cudn1 := testEVPNClusterUDN("evpn-vni-1", &udnv1.EVPNConfig{VTEP: vtep.Name, MACVRF: &apitypes.VRFConfig{VNI: 100}}, testNs.Name)
+				cudn2 := testEVPNClusterUDN("evpn-vni-2", &udnv1.EVPNConfig{VTEP: vtep.Name, MACVRF: &apitypes.VRFConfig{VNI: 100}}, testNs.Name)
 				cudn2.UID = "2"
 
 				c = newTestControllerWithNetworkManager(template.RenderNetAttachDefManifest, cudn1, cudn2, testNs, vtep)
@@ -896,8 +896,8 @@ var _ = Describe("User Defined Network Controller", func() {
 				testNs := testNamespace("evpn-diff-vtep-test")
 				vtep1 := testVTEP("vtep-1")
 				vtep2 := testVTEP("vtep-2")
-				cudn1 := testEVPNClusterUDN("evpn-vtep1-net", &udnv1.EVPNConfig{VTEP: vtep1.Name, MACVRF: &udnv1.VRFConfig{VNI: 100}}, testNs.Name)
-				cudn2 := testEVPNClusterUDN("evpn-vtep2-net", &udnv1.EVPNConfig{VTEP: vtep2.Name, MACVRF: &udnv1.VRFConfig{VNI: 100}}, testNs.Name)
+				cudn1 := testEVPNClusterUDN("evpn-vtep1-net", &udnv1.EVPNConfig{VTEP: vtep1.Name, MACVRF: &apitypes.VRFConfig{VNI: 100}}, testNs.Name)
+				cudn2 := testEVPNClusterUDN("evpn-vtep2-net", &udnv1.EVPNConfig{VTEP: vtep2.Name, MACVRF: &apitypes.VRFConfig{VNI: 100}}, testNs.Name)
 				cudn2.UID = "2"
 
 				c = newTestControllerWithNetworkManager(template.RenderNetAttachDefManifest, cudn1, cudn2, testNs, vtep1, vtep2)
@@ -919,7 +919,7 @@ var _ = Describe("User Defined Network Controller", func() {
 			It("should release VID when EVPN CUDN is deleted", func() {
 				testNs := testNamespace("evpn-delete-test")
 				vtep := testVTEP("vtep-test")
-				cudn := testEVPNClusterUDN("evpn-delete-cudn", &udnv1.EVPNConfig{VTEP: vtep.Name, MACVRF: &udnv1.VRFConfig{VNI: 100}}, testNs.Name)
+				cudn := testEVPNClusterUDN("evpn-delete-cudn", &udnv1.EVPNConfig{VTEP: vtep.Name, MACVRF: &apitypes.VRFConfig{VNI: 100}}, testNs.Name)
 
 				c = newTestControllerWithNetworkManager(template.RenderNetAttachDefManifest, cudn, testNs, vtep)
 				Expect(c.Run()).To(Succeed())
@@ -986,7 +986,7 @@ var _ = Describe("User Defined Network Controller", func() {
 			It("should preserve allocated VID when EVPN CUDN is updated", func() {
 				testNs := testNamespace("evpn-update-test")
 				vtep := testVTEP("vtep-test")
-				cudn := testEVPNClusterUDN("evpn-update-cudn", &udnv1.EVPNConfig{VTEP: vtep.Name, MACVRF: &udnv1.VRFConfig{VNI: 100}}, testNs.Name)
+				cudn := testEVPNClusterUDN("evpn-update-cudn", &udnv1.EVPNConfig{VTEP: vtep.Name, MACVRF: &apitypes.VRFConfig{VNI: 100}}, testNs.Name)
 
 				c = newTestControllerWithNetworkManager(template.RenderNetAttachDefManifest, cudn, testNs, vtep)
 				Expect(c.Run()).To(Succeed())
@@ -1021,7 +1021,7 @@ var _ = Describe("User Defined Network Controller", func() {
 				// and a new VID is allocated.
 				testNs := testNamespace("evpn-all-corrupted-test")
 				vtep := testVTEP("vtep-test")
-				cudn := testEVPNClusterUDN("evpn-all-corrupted", &udnv1.EVPNConfig{VTEP: vtep.Name, MACVRF: &udnv1.VRFConfig{VNI: 100}}, testNs.Name)
+				cudn := testEVPNClusterUDN("evpn-all-corrupted", &udnv1.EVPNConfig{VTEP: vtep.Name, MACVRF: &apitypes.VRFConfig{VNI: 100}}, testNs.Name)
 
 				// Create a corrupted NAD owned by the CUDN - NetworkManager will fail to parse it
 				corruptedNAD := testEVPNClusterUdnNADOwnedByCUDN(cudn, testNs.Name, &ovncnitypes.EVPNConfig{VTEP: vtep.Name, MACVRF: &ovncnitypes.VRFConfig{VNI: 100}})
@@ -1047,7 +1047,7 @@ var _ = Describe("User Defined Network Controller", func() {
 				// Instead, the CUDN is enqueued for reconciliation and gets a new VID.
 				testNs := testNamespace("evpn-vid-conflict-test")
 				vtep := testVTEP("vtep-test")
-				cudn := testEVPNClusterUDN("evpn-conflict", &udnv1.EVPNConfig{VTEP: vtep.Name, MACVRF: &udnv1.VRFConfig{VNI: 100}}, testNs.Name)
+				cudn := testEVPNClusterUDN("evpn-conflict", &udnv1.EVPNConfig{VTEP: vtep.Name, MACVRF: &apitypes.VRFConfig{VNI: 100}}, testNs.Name)
 
 				// Create a NAD with VID 5 for MAC-VRF
 				existingNAD := testEVPNClusterUdnNADOwnedByCUDN(cudn, testNs.Name, &ovncnitypes.EVPNConfig{VTEP: vtep.Name, MACVRF: &ovncnitypes.VRFConfig{VNI: 100, VID: 5}})
@@ -1144,7 +1144,7 @@ var _ = Describe("User Defined Network Controller", func() {
 			It("should not fail startup when CUDN exists but has no NADs yet", func() {
 				vtep := testVTEP("vtep-test")
 				// Create a CUDN without any NADs (namespace doesn't match selector)
-				cudnWithNoNADs := testEVPNClusterUDN("evpn-no-nads", &udnv1.EVPNConfig{VTEP: vtep.Name, MACVRF: &udnv1.VRFConfig{VNI: 100}}, "nonexistent-ns")
+				cudnWithNoNADs := testEVPNClusterUDN("evpn-no-nads", &udnv1.EVPNConfig{VTEP: vtep.Name, MACVRF: &apitypes.VRFConfig{VNI: 100}}, "nonexistent-ns")
 
 				c = newTestControllerWithNetworkManager(renderNadStub(nil), cudnWithNoNADs, vtep)
 
@@ -1160,7 +1160,7 @@ var _ = Describe("User Defined Network Controller", func() {
 				// 2. UDN controller starts and recovers VIDs from NetworkManager's cache
 				testNs := testNamespace("evpn-nm-recovery-test")
 				vtep := testVTEP("vtep-test")
-				cudn := testEVPNClusterUDN("evpn-nm-recovery", &udnv1.EVPNConfig{VTEP: vtep.Name, MACVRF: &udnv1.VRFConfig{VNI: 100}}, testNs.Name)
+				cudn := testEVPNClusterUDN("evpn-nm-recovery", &udnv1.EVPNConfig{VTEP: vtep.Name, MACVRF: &apitypes.VRFConfig{VNI: 100}}, testNs.Name)
 
 				// Create an existing NAD with VID 42 (simulating a previous controller run)
 				existingNAD := testEVPNClusterUdnNADOwnedByCUDN(cudn, testNs.Name, &ovncnitypes.EVPNConfig{VTEP: vtep.Name, MACVRF: &ovncnitypes.VRFConfig{VNI: 100, VID: 42}})
@@ -1182,11 +1182,11 @@ var _ = Describe("User Defined Network Controller", func() {
 				vtep := testVTEP("vtep-test")
 
 				// Create two CUDNs with different creation timestamps and unique UIDs
-				olderCUDN := testEVPNClusterUDN("aaa-older-cudn", &udnv1.EVPNConfig{VTEP: vtep.Name, MACVRF: &udnv1.VRFConfig{VNI: 100}}, testNs1.Name)
+				olderCUDN := testEVPNClusterUDN("aaa-older-cudn", &udnv1.EVPNConfig{VTEP: vtep.Name, MACVRF: &apitypes.VRFConfig{VNI: 100}}, testNs1.Name)
 				olderCUDN.UID = "older-uid-1"
 				olderCUDN.CreationTimestamp = metav1.NewTime(time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC))
 
-				newerCUDN := testEVPNClusterUDN("zzz-newer-cudn", &udnv1.EVPNConfig{VTEP: vtep.Name, MACVRF: &udnv1.VRFConfig{VNI: 300}}, testNs2.Name)
+				newerCUDN := testEVPNClusterUDN("zzz-newer-cudn", &udnv1.EVPNConfig{VTEP: vtep.Name, MACVRF: &apitypes.VRFConfig{VNI: 300}}, testNs2.Name)
 				newerCUDN.UID = "newer-uid-2"
 				newerCUDN.CreationTimestamp = metav1.NewTime(time.Date(2024, 6, 1, 0, 0, 0, 0, time.UTC))
 
@@ -1217,7 +1217,7 @@ var _ = Describe("User Defined Network Controller", func() {
 			It("should return error when VID pool is exhausted", func() {
 				testNs := testNamespace("evpn-exhaustion-test")
 				vtep := testVTEP("vtep-test")
-				cudn := testEVPNClusterUDN("evpn-exhaust-cudn", &udnv1.EVPNConfig{VTEP: vtep.Name, MACVRF: &udnv1.VRFConfig{VNI: 100}}, testNs.Name)
+				cudn := testEVPNClusterUDN("evpn-exhaust-cudn", &udnv1.EVPNConfig{VTEP: vtep.Name, MACVRF: &apitypes.VRFConfig{VNI: 100}}, testNs.Name)
 
 				c = newTestControllerWithNetworkManager(template.RenderNetAttachDefManifest, cudn, testNs, vtep)
 
@@ -1254,7 +1254,7 @@ var _ = Describe("User Defined Network Controller", func() {
 			It("should allocate VID after pool is freed up", func() {
 				testNs := testNamespace("evpn-free-test")
 				vtep := testVTEP("vtep-test")
-				cudn := testEVPNClusterUDN("evpn-free-cudn", &udnv1.EVPNConfig{VTEP: vtep.Name, MACVRF: &udnv1.VRFConfig{VNI: 100}}, testNs.Name)
+				cudn := testEVPNClusterUDN("evpn-free-cudn", &udnv1.EVPNConfig{VTEP: vtep.Name, MACVRF: &apitypes.VRFConfig{VNI: 100}}, testNs.Name)
 
 				c = newTestControllerWithNetworkManager(template.RenderNetAttachDefManifest, cudn, testNs, vtep)
 
@@ -1318,7 +1318,7 @@ var _ = Describe("User Defined Network Controller", func() {
 				const runtimeNsName = "runtime-ns-test"
 
 				// CUDN with selector matching a namespace that doesn't exist yet
-				cudn := testEVPNClusterUDN("evpn-runtime-cudn", &udnv1.EVPNConfig{VTEP: vtep.Name, MACVRF: &udnv1.VRFConfig{VNI: 100}}, runtimeNsName)
+				cudn := testEVPNClusterUDN("evpn-runtime-cudn", &udnv1.EVPNConfig{VTEP: vtep.Name, MACVRF: &apitypes.VRFConfig{VNI: 100}}, runtimeNsName)
 
 				// Start controller - no NADs to recover, allocator empty for this key
 				c = newTestControllerWithNetworkManager(template.RenderNetAttachDefManifest, cudn, vtep)
@@ -1355,7 +1355,7 @@ var _ = Describe("User Defined Network Controller", func() {
 				// Namespace that doesn't exist at startup
 				const runtimeNsName = "runtime-conflict-test"
 
-				cudn := testEVPNClusterUDN("evpn-runtime-conflict", &udnv1.EVPNConfig{VTEP: vtep.Name, MACVRF: &udnv1.VRFConfig{VNI: 100}}, runtimeNsName)
+				cudn := testEVPNClusterUDN("evpn-runtime-conflict", &udnv1.EVPNConfig{VTEP: vtep.Name, MACVRF: &apitypes.VRFConfig{VNI: 100}}, runtimeNsName)
 
 				// Start controller - no NADs to recover, allocator empty for this key
 				c = newTestControllerWithNetworkManager(template.RenderNetAttachDefManifest, cudn, vtep)
@@ -1392,7 +1392,7 @@ var _ = Describe("User Defined Network Controller", func() {
 				// existing VID takes precedence because ReserveID fails when key already has a VID.
 				testNs := testNamespace("evpn-vid-manual-change-test")
 				vtep := testVTEP("vtep-test")
-				cudn := testEVPNClusterUDN("evpn-manual-change-cudn", &udnv1.EVPNConfig{VTEP: vtep.Name, MACVRF: &udnv1.VRFConfig{VNI: 100}}, testNs.Name)
+				cudn := testEVPNClusterUDN("evpn-manual-change-cudn", &udnv1.EVPNConfig{VTEP: vtep.Name, MACVRF: &apitypes.VRFConfig{VNI: 100}}, testNs.Name)
 
 				c = newTestControllerWithNetworkManager(template.RenderNetAttachDefManifest, cudn, testNs, vtep)
 				Expect(c.Run()).To(Succeed())
@@ -1424,7 +1424,7 @@ var _ = Describe("User Defined Network Controller", func() {
 
 			It("should report VTEPNotFound when EVPN CUDN references non-existent VTEP", func() {
 				testNs := testNamespace("evpn-vtep-missing-test")
-				cudn := testEVPNClusterUDN("evpn-vtep-missing", &udnv1.EVPNConfig{VTEP: "default", MACVRF: &udnv1.VRFConfig{VNI: 100}}, testNs.Name)
+				cudn := testEVPNClusterUDN("evpn-vtep-missing", &udnv1.EVPNConfig{VTEP: "default", MACVRF: &apitypes.VRFConfig{VNI: 100}}, testNs.Name)
 
 				c = newTestControllerWithNetworkManager(template.RenderNetAttachDefManifest, cudn, testNs)
 				Expect(c.Run()).To(Succeed())
@@ -1453,7 +1453,7 @@ var _ = Describe("User Defined Network Controller", func() {
 			It("should create NAD when VTEP exists for EVPN CUDN", func() {
 				testNs := testNamespace("evpn-vtep-exists-test")
 				vtep := testVTEP("vtep-test")
-				cudn := testEVPNClusterUDN("evpn-vtep-exists", &udnv1.EVPNConfig{VTEP: vtep.Name, MACVRF: &udnv1.VRFConfig{VNI: 100}}, testNs.Name)
+				cudn := testEVPNClusterUDN("evpn-vtep-exists", &udnv1.EVPNConfig{VTEP: vtep.Name, MACVRF: &apitypes.VRFConfig{VNI: 100}}, testNs.Name)
 
 				c = newTestControllerWithNetworkManager(template.RenderNetAttachDefManifest, cudn, testNs, vtep)
 				Expect(c.Run()).To(Succeed())
@@ -1484,7 +1484,7 @@ var _ = Describe("User Defined Network Controller", func() {
 			It("should automatically reconcile CUDN when VTEP is created after CUDN", func() {
 				testNs := testNamespace("evpn-vtep-transition-test")
 				vtepName := "default"
-				cudn := testEVPNClusterUDN("evpn-vtep-transition", &udnv1.EVPNConfig{VTEP: vtepName, MACVRF: &udnv1.VRFConfig{VNI: 100}}, testNs.Name)
+				cudn := testEVPNClusterUDN("evpn-vtep-transition", &udnv1.EVPNConfig{VTEP: vtepName, MACVRF: &apitypes.VRFConfig{VNI: 100}}, testNs.Name)
 
 				// Start controller WITHOUT the VTEP - CUDN references non-existent VTEP
 				c = newTestControllerWithNetworkManager(template.RenderNetAttachDefManifest, cudn, testNs)
@@ -1547,7 +1547,7 @@ var _ = Describe("User Defined Network Controller", func() {
 				nonEvpnCUDN.UID = "non-evpn-uid"
 
 				// Create an EVPN CUDN that references the VTEP
-				evpnCUDN := testEVPNClusterUDN("evpn-cudn", &udnv1.EVPNConfig{VTEP: vtep.Name, MACVRF: &udnv1.VRFConfig{VNI: 100}}, testNs.Name)
+				evpnCUDN := testEVPNClusterUDN("evpn-cudn", &udnv1.EVPNConfig{VTEP: vtep.Name, MACVRF: &apitypes.VRFConfig{VNI: 100}}, testNs.Name)
 				evpnCUDN.UID = "evpn-uid"
 
 				c = newTestControllerWithNetworkManager(template.RenderNetAttachDefManifest, nonEvpnCUDN, evpnCUDN, testNs, vtep)
@@ -1568,7 +1568,7 @@ var _ = Describe("User Defined Network Controller", func() {
 			It("should report VTEPNotFound when VTEP is deleted after CUDN creation", func() {
 				testNs := testNamespace("evpn-vtep-delete-test")
 				vtep := testVTEP("vtep-to-delete")
-				cudn := testEVPNClusterUDN("evpn-vtep-delete", &udnv1.EVPNConfig{VTEP: vtep.Name, MACVRF: &udnv1.VRFConfig{VNI: 100}}, testNs.Name)
+				cudn := testEVPNClusterUDN("evpn-vtep-delete", &udnv1.EVPNConfig{VTEP: vtep.Name, MACVRF: &apitypes.VRFConfig{VNI: 100}}, testNs.Name)
 
 				c = newTestControllerWithNetworkManager(template.RenderNetAttachDefManifest, cudn, testNs, vtep)
 				Expect(c.Run()).To(Succeed())
@@ -1627,7 +1627,7 @@ var _ = Describe("User Defined Network Controller", func() {
 
 				testNs := testNamespace("evpn-disabled-test")
 				vtep := testVTEP("vtep-test")
-				cudn := testEVPNClusterUDN("evpn-disabled-cudn", &udnv1.EVPNConfig{VTEP: vtep.Name, MACVRF: &udnv1.VRFConfig{VNI: 100}}, testNs.Name)
+				cudn := testEVPNClusterUDN("evpn-disabled-cudn", &udnv1.EVPNConfig{VTEP: vtep.Name, MACVRF: &apitypes.VRFConfig{VNI: 100}}, testNs.Name)
 
 				c = newTestControllerWithNetworkManager(template.RenderNetAttachDefManifest, cudn, testNs, vtep)
 				Expect(c.Run()).To(Succeed())
@@ -2629,7 +2629,7 @@ var _ = Describe("User Defined Network Controller", func() {
 			cudn.Spec.Network.Transport = udnv1.TransportOptionEVPN
 			cudn.Spec.Network.EVPN = &udnv1.EVPNConfig{
 				VTEP:  "test-vtep",
-				IPVRF: &udnv1.VRFConfig{VNI: 100},
+				IPVRF: &apitypes.VRFConfig{VNI: 100},
 			}
 		}
 		return cudn
@@ -2851,7 +2851,7 @@ var _ = Describe("User Defined Network Controller", func() {
 
 			testNs := testNamespace("metrics-evpn-ns")
 			vtep := testVTEP("vtep-metrics")
-			cudn := testEVPNClusterUDN("metrics-evpn-cudn", &udnv1.EVPNConfig{VTEP: vtep.Name, MACVRF: &udnv1.VRFConfig{VNI: 100}}, testNs.Name)
+			cudn := testEVPNClusterUDN("metrics-evpn-cudn", &udnv1.EVPNConfig{VTEP: vtep.Name, MACVRF: &apitypes.VRFConfig{VNI: 100}}, testNs.Name)
 			cudn.Finalizers = nil
 			cudn.Spec.Network.Layer2.Role = udnv1.NetworkRolePrimary
 
@@ -2960,7 +2960,7 @@ var _ = Describe("User Defined Network Controller", func() {
 		It("should record TransportAccepted condition metric for EVPN CUDN with accepted RA", func() {
 			testNs := testNamespace("cond-evpn-ns")
 			vtep := testVTEP("cond-vtep")
-			cudn := testEVPNClusterUDN("cond-evpn-cudn", &udnv1.EVPNConfig{VTEP: vtep.Name, MACVRF: &udnv1.VRFConfig{VNI: 100}}, testNs.Name)
+			cudn := testEVPNClusterUDN("cond-evpn-cudn", &udnv1.EVPNConfig{VTEP: vtep.Name, MACVRF: &apitypes.VRFConfig{VNI: 100}}, testNs.Name)
 
 			c = newTestControllerWithNetworkManager(template.RenderNetAttachDefManifest, cudn, testNs, vtep)
 			Expect(c.Run()).To(Succeed())
@@ -3325,15 +3325,15 @@ func testEVPNClusterUdnNADOwnedByCUDN(cudn *udnv1.ClusterUserDefinedNetwork, nam
 func testSymmetricIRBClusterUDN(name string, vtepName string, targetNamespaces ...string) *udnv1.ClusterUserDefinedNetwork {
 	return testEVPNClusterUDN(name, &udnv1.EVPNConfig{
 		VTEP:   vtepName,
-		MACVRF: &udnv1.VRFConfig{VNI: 100},
-		IPVRF:  &udnv1.VRFConfig{VNI: 200},
+		MACVRF: &apitypes.VRFConfig{VNI: 100},
+		IPVRF:  &apitypes.VRFConfig{VNI: 200},
 	}, targetNamespaces...)
 }
 
 func testEVPNIPVRFClusterUDN(name string, vtepName string, targetNamespaces ...string) *udnv1.ClusterUserDefinedNetwork {
 	cudn := testEVPNClusterUDN(name, &udnv1.EVPNConfig{
 		VTEP:  vtepName,
-		IPVRF: &udnv1.VRFConfig{VNI: 200},
+		IPVRF: &apitypes.VRFConfig{VNI: 200},
 	}, targetNamespaces...)
 	cudn.Spec.Network.Topology = udnv1.NetworkTopologyLayer3
 	cudn.Spec.Network.Layer2 = nil

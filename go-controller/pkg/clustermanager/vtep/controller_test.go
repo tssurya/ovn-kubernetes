@@ -25,6 +25,7 @@ import (
 
 	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/config"
 	controllerutil "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/controller"
+	apitypes "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/types"
 	udnv1 "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/userdefinednetwork/v1"
 	vtepv1 "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/vtep/v1"
 	vtepfake "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/vtep/v1/apis/clientset/versioned/fake"
@@ -67,7 +68,7 @@ func newCUDNWithEVPN(name, vtepName string) *udnv1.ClusterUserDefinedNetwork {
 				},
 				EVPN: &udnv1.EVPNConfig{
 					VTEP:  vtepName,
-					IPVRF: &udnv1.VRFConfig{VNI: 100},
+					IPVRF: &apitypes.VRFConfig{VNI: 100},
 				},
 			},
 		},

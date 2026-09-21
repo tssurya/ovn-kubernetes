@@ -33,9 +33,15 @@ type ClusterNetworkConnectSpecApplyConfiguration struct {
 	//
 	// Does not have a default value for the above reason so
 	// that user takes care in setting non-overlapping subnets.
+	// Required when evpnConfiguration is not set (Geneve transport).
+	// Forbidden when evpnConfiguration is set (EVPN transport).
 	ConnectSubnets []ConnectSubnetApplyConfiguration `json:"connectSubnets,omitempty"`
 	// connectivity specifies which connectivity types should be enabled for the connected networks.
 	Connectivity []clusternetworkconnectv1.ConnectivityType `json:"connectivity,omitempty"`
+	// evpnConfiguration configures the parent VRF for connecting EVPN-based CUDNs.
+	// Required when the selected CUDNs use EVPN transport.
+	// Forbidden when selected CUDNs use Geneve transport (use connectSubnets instead).
+	EVPNConfiguration *EVPNCNCConfigApplyConfiguration `json:"evpnConfiguration,omitempty"`
 }
 
 // ClusterNetworkConnectSpecApplyConfiguration constructs a declarative configuration of the ClusterNetworkConnectSpec type for use with
@@ -72,5 +78,13 @@ func (b *ClusterNetworkConnectSpecApplyConfiguration) WithConnectivity(values ..
 	for i := range values {
 		b.Connectivity = append(b.Connectivity, values[i])
 	}
+	return b
+}
+
+// WithEVPNConfiguration sets the EVPNConfiguration field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the EVPNConfiguration field is set to the value of the last call.
+func (b *ClusterNetworkConnectSpecApplyConfiguration) WithEVPNConfiguration(value *EVPNCNCConfigApplyConfiguration) *ClusterNetworkConnectSpecApplyConfiguration {
+	b.EVPNConfiguration = value
 	return b
 }

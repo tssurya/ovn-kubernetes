@@ -27,6 +27,7 @@ func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenA
 		types.NetworkSelector{}.OpenAPIModelName():                        schema_go_controller_pkg_crd_types_NetworkSelector(ref),
 		types.PrimaryUserDefinedNetworkSelector{}.OpenAPIModelName():      schema_go_controller_pkg_crd_types_PrimaryUserDefinedNetworkSelector(ref),
 		types.SecondaryUserDefinedNetworkSelector{}.OpenAPIModelName():    schema_go_controller_pkg_crd_types_SecondaryUserDefinedNetworkSelector(ref),
+		types.VRFConfig{}.OpenAPIModelName():                              schema_go_controller_pkg_crd_types_VRFConfig(ref),
 		v1.VTEP{}.OpenAPIModelName():                                      schema_pkg_crd_vtep_v1_VTEP(ref),
 		v1.VTEPList{}.OpenAPIModelName():                                  schema_pkg_crd_vtep_v1_VTEPList(ref),
 		v1.VTEPSpec{}.OpenAPIModelName():                                  schema_pkg_crd_vtep_v1_VTEPSpec(ref),
@@ -275,6 +276,35 @@ func schema_go_controller_pkg_crd_types_SecondaryUserDefinedNetworkSelector(ref 
 		},
 		Dependencies: []string{
 			metav1.LabelSelector{}.OpenAPIModelName()},
+	}
+}
+
+func schema_go_controller_pkg_crd_types_VRFConfig(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "VRFConfig contains configuration for a VRF in EVPN.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"vni": {
+						SchemaProps: spec.SchemaProps{
+							Description: "VNI is the Virtual Network Identifier for this VRF. VNI is a 24-bit field in the VXLAN header (RFC 7348), allowing values from 1 to 16777215. but in the future this could be having different limit for other dataplane implementations. Must be unique across all EVPN configurations in the cluster.",
+							Default:     0,
+							Type:        []string{"integer"},
+							Format:      "int32",
+						},
+					},
+					"routeTarget": {
+						SchemaProps: spec.SchemaProps{
+							Description: "RouteTarget is the import/export route target for this VRF. If not specified, it will be auto-generated as \"<AS (Autonomous System)>:<VNI (Virtual Network Identifier)>\". Auto-generation will use 2-byte AS if VNI > 65535, since 4-byte AS/IPv4 only allows 2-byte local admin.\n\nFollows FRR EVPN L3 Route-Target format (A.B.C.D:MN|EF:OPQR|GHJK:MN|*:OPQR|*:MN):\n  - EF:OPQR   = 2-byte AS (1-65535) : local admin (4 bytes, 1-4294967295)\n  - GHJK:MN   = 4-byte AS (65536-4294967295) : local admin (2 bytes, 1-65535)\n  - A.B.C.D:MN = IPv4 address : local admin (2 bytes, 1-65535)\n  - *:OPQR    = wildcard AS : local admin (4 bytes, 1-4294967295) - for import matching\n  - *:MN      = wildcard AS : local admin (2 bytes, 1-65535) - for import matching\n\nThe 6-byte value constraint (RFC 4360) means AS size + local admin size = 6 bytes.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+				},
+				Required: []string{"vni"},
+			},
+		},
 	}
 }
 

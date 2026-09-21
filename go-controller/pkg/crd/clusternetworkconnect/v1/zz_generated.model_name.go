@@ -32,3 +32,8 @@ func (in ClusterNetworkConnectStatus) OpenAPIModelName() string {
 func (in ConnectSubnet) OpenAPIModelName() string {
 	return "com.github.ovn-kubernetes.ovn-kubernetes.go-controller.pkg.crd.clusternetworkconnect.v1.ConnectSubnet"
 }
+
+// OpenAPIModelName returns the OpenAPI model name for this type.
+func (in EVPNCNCConfig) OpenAPIModelName() string {
+	return "com.github.ovn-kubernetes.ovn-kubernetes.go-controller.pkg.crd.clusternetworkconnect.v1.EVPNCNCConfig"
+}

@@ -97,8 +97,3 @@ func (in UserDefinedNetworkStatus) OpenAPIModelName() string {
 func (in VLANConfig) OpenAPIModelName() string {
 	return "com.github.ovn-kubernetes.ovn-kubernetes.go-controller.pkg.crd.userdefinednetwork.v1.VLANConfig"
 }
-
-// OpenAPIModelName returns the OpenAPI model name for this type.
-func (in VRFConfig) OpenAPIModelName() string {
-	return "com.github.ovn-kubernetes.ovn-kubernetes.go-controller.pkg.crd.userdefinednetwork.v1.VRFConfig"
-}

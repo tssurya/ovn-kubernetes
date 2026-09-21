@@ -51,8 +51,6 @@ func ForKind(kind schema.GroupVersionKind) interface{} {
 		return &userdefinednetworkv1.UserDefinedNetworkStatusApplyConfiguration{}
 	case v1.SchemeGroupVersion.WithKind("VLANConfig"):
 		return &userdefinednetworkv1.VLANConfigApplyConfiguration{}
-	case v1.SchemeGroupVersion.WithKind("VRFConfig"):
-		return &userdefinednetworkv1.VRFConfigApplyConfiguration{}
 
 	}
 	return nil

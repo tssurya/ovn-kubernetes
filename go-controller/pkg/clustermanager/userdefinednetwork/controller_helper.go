@@ -22,6 +22,7 @@ import (
 
 	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/clustermanager/userdefinednetwork/template"
 	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/config"
+	crdtypes "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/types"
 	userdefinednetworkv1 "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/userdefinednetwork/v1"
 	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/metrics"
 	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/types"
@@ -211,7 +212,7 @@ func (c *Controller) allocateEVPNIDsIfNeeded(obj client.Object) ([]template.Rend
 	networkName := obj.GetName()
 
 	// ptr.Deref yields zero-value VRFConfig for nil VRFs, reserveVNIs skips VNI 0
-	if err := c.reserveVNIs(networkName, evpnCfg.VTEP, ptr.Deref(evpnCfg.MACVRF, userdefinednetworkv1.VRFConfig{}).VNI, ptr.Deref(evpnCfg.IPVRF, userdefinednetworkv1.VRFConfig{}).VNI); err != nil {
+	if err := c.reserveVNIs(networkName, evpnCfg.VTEP, ptr.Deref(evpnCfg.MACVRF, crdtypes.VRFConfig{}).VNI, ptr.Deref(evpnCfg.IPVRF, crdtypes.VRFConfig{}).VNI); err != nil {
 		return nil, fmt.Errorf("failed to reserve VNIs: %w", err)
 	}
 

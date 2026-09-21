@@ -51,6 +51,8 @@ type ClusterNetworkConnect struct {
 
 // ClusterNetworkConnectSpec defines the desired state of ClusterNetworkConnect.
 // +kubebuilder:validation:XValidation:rule="!self.networkSelectors.exists(i, i.networkSelectionType != 'ClusterUserDefinedNetworks' && i.networkSelectionType != 'PrimaryUserDefinedNetworks')",message="Only ClusterUserDefinedNetworks or PrimaryUserDefinedNetworks can be selected"
+// +kubebuilder:validation:XValidation:rule="has(self.connectSubnets) || has(self.evpnConfiguration)",message="either connectSubnets or evpnConfiguration must be specified"
+// +kubebuilder:validation:XValidation:rule="!has(self.connectSubnets) || !has(self.evpnConfiguration)",message="connectSubnets and evpnConfiguration are mutually exclusive"
 type ClusterNetworkConnectSpec struct {
 	// networkSelectors selects the networks to be connected together.
 	// This can match User Defined Networks (UDNs) and/or Cluster User Defined Networks (CUDNs).
@@ -74,15 +76,15 @@ type ClusterNetworkConnectSpec struct {
 	//
 	// Does not have a default value for the above reason so
 	// that user takes care in setting non-overlapping subnets.
-	// +kubebuilder:validation:Required
-	// +kubebuilder:validation:MinItems=1
+	// Required when evpnConfiguration is not set (Geneve transport).
+	// Forbidden when evpnConfiguration is set (EVPN transport).
+	// +optional
 	// +kubebuilder:validation:MaxItems=2
-	// +required
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf", message="connectSubnets is immutable"
 	// +kubebuilder:validation:XValidation:rule="size(self) != 2 || !isCIDR(self[0].cidr) || !isCIDR(self[1].cidr) || cidr(self[0].cidr).ip().family() != cidr(self[1].cidr).ip().family()", message="When 2 CIDRs are set, they must be from different IP families"
 	// +kubebuilder:validation:XValidation:rule="size(self) != 2 || !isCIDR(self[0].cidr) || !isCIDR(self[1].cidr) || cidr(self[0].cidr).ip().family() == cidr(self[1].cidr).ip().family() || (cidr(self[0].cidr).ip().family() == 4 ? (32 - self[0].networkPrefix) == (128 - self[1].networkPrefix) : (128 - self[0].networkPrefix) == (32 - self[1].networkPrefix))", message="For dual-stack, networkPrefix must have matching host bits: (32 - ipv4NetworkPrefix) must equal (128 - ipv6NetworkPrefix)"
 	// +listType=atomic
-	ConnectSubnets []ConnectSubnet `json:"connectSubnets"`
+	ConnectSubnets []ConnectSubnet `json:"connectSubnets,omitempty"`
 
 	// connectivity specifies which connectivity types should be enabled for the connected networks.
 	//
@@ -92,6 +94,12 @@ type ClusterNetworkConnectSpec struct {
 	// +kubebuilder:validation:XValidation:rule="self.all(x, self.exists_one(y, x == y))",message="connectivity cannot contain duplicate values"
 	// +listType=atomic
 	Connectivity []ConnectivityType `json:"connectivity"`
+
+	// evpnConfiguration configures the parent VRF for connecting EVPN-based CUDNs.
+	// Required when the selected CUDNs use EVPN transport.
+	// Forbidden when selected CUDNs use Geneve transport (use connectSubnets instead).
+	// +optional
+	EVPNConfiguration *EVPNCNCConfig `json:"evpnConfiguration,omitempty"`
 }
 
 // +kubebuilder:validation:XValidation:rule="isCIDR(self) && cidr(self) == cidr(self).masked()", message="CIDR must be a valid network address"
@@ -141,6 +149,19 @@ type ConnectSubnet struct {
 	// +kubebuilder:validation:Maximum=127
 	// +required
 	NetworkPrefix int32 `json:"networkPrefix"`
+}
+
+// EVPNCNCConfig configures the parent VRF created by a CNC to connect EVPN-based CUDNs.
+// The parent VRF acts as the L3 routing hub: it owns a single L3 VNI and imports routes
+// from each connected CUDN's per-CUDN VRF via FRR's `import vrf` directive.
+type EVPNCNCConfig struct {
+	// ipVRF configures the parent VRF's L3 VNI and optional route target.
+	// The VNI must be unique across all EVPN VNIs in the cluster (both CUDN VNIs and
+	// other CNC parent VRF VNIs). If routeTarget is not specified, it is auto-generated
+	// as "<ASN>:<VNI>".
+	// +kubebuilder:validation:Required
+	// +required
+	IPVRF types.VRFConfig `json:"ipVRF"`
 }
 
 // ConnectivityType represents the different connectivity types that can be enabled for connected networks.

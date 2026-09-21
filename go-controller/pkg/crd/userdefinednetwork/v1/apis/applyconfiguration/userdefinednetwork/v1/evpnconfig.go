@@ -5,6 +5,10 @@
 
 package v1
 
+import (
+	types "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/types"
+)
+
 // EVPNConfigApplyConfiguration represents a declarative configuration of the EVPNConfig type for use
 // with apply.
 //
@@ -14,10 +18,10 @@ type EVPNConfigApplyConfiguration struct {
 	VTEP *string `json:"vtep,omitempty"`
 	// MACVRF contains the MAC-VRF configuration for Layer 2 EVPN.
 	// This field is required for Layer2 topology and forbidden for Layer3 topology.
-	MACVRF *VRFConfigApplyConfiguration `json:"macVRF,omitempty"`
+	MACVRF *types.VRFConfig `json:"macVRF,omitempty"`
 	// IPVRF contains the IP-VRF configuration for Layer 3 EVPN.
 	// This field is required for Layer3 topology and optional for Layer2 topology.
-	IPVRF *VRFConfigApplyConfiguration `json:"ipVRF,omitempty"`
+	IPVRF *types.VRFConfig `json:"ipVRF,omitempty"`
 }
 
 // EVPNConfigApplyConfiguration constructs a declarative configuration of the EVPNConfig type for use with
@@ -37,15 +41,15 @@ func (b *EVPNConfigApplyConfiguration) WithVTEP(value string) *EVPNConfigApplyCo
 // WithMACVRF sets the MACVRF field in the declarative configuration to the given value
 // and returns the receiver, so that objects can be built by chaining "With" function invocations.
 // If called multiple times, the MACVRF field is set to the value of the last call.
-func (b *EVPNConfigApplyConfiguration) WithMACVRF(value *VRFConfigApplyConfiguration) *EVPNConfigApplyConfiguration {
-	b.MACVRF = value
+func (b *EVPNConfigApplyConfiguration) WithMACVRF(value types.VRFConfig) *EVPNConfigApplyConfiguration {
+	b.MACVRF = &value
 	return b
 }
 
 // WithIPVRF sets the IPVRF field in the declarative configuration to the given value
 // and returns the receiver, so that objects can be built by chaining "With" function invocations.
 // If called multiple times, the IPVRF field is set to the value of the last call.
-func (b *EVPNConfigApplyConfiguration) WithIPVRF(value *VRFConfigApplyConfiguration) *EVPNConfigApplyConfiguration {
-	b.IPVRF = value
+func (b *EVPNConfigApplyConfiguration) WithIPVRF(value types.VRFConfig) *EVPNConfigApplyConfiguration {
+	b.IPVRF = &value
 	return b
 }

@@ -62,6 +62,9 @@ var schemaYAML = typed.YAMLObject(`types:
           elementType:
             scalar: string
           elementRelationship: atomic
+    - name: evpnConfiguration
+      type:
+        namedType: com.github.ovn-kubernetes.ovn-kubernetes.go-controller.pkg.crd.clusternetworkconnect.v1.EVPNCNCConfig
     - name: networkSelectors
       type:
         list:
@@ -93,6 +96,13 @@ var schemaYAML = typed.YAMLObject(`types:
       type:
         scalar: numeric
       default: 0
+- name: com.github.ovn-kubernetes.ovn-kubernetes.go-controller.pkg.crd.clusternetworkconnect.v1.EVPNCNCConfig
+  map:
+    fields:
+    - name: ipVRF
+      type:
+        namedType: com.github.ovn-kubernetes.ovn-kubernetes.go-controller.pkg.crd.types.VRFConfig
+      default: {}
 - name: com.github.ovn-kubernetes.ovn-kubernetes.go-controller.pkg.crd.types.ClusterUserDefinedNetworkSelector
   map:
     fields:
@@ -148,6 +158,16 @@ var schemaYAML = typed.YAMLObject(`types:
       type:
         namedType: io.k8s.apimachinery.pkg.apis.meta.v1.LabelSelector
       default: {}
+- name: com.github.ovn-kubernetes.ovn-kubernetes.go-controller.pkg.crd.types.VRFConfig
+  map:
+    fields:
+    - name: routeTarget
+      type:
+        scalar: string
+    - name: vni
+      type:
+        scalar: numeric
+      default: 0
 - name: io.k8s.apimachinery.pkg.apis.meta.v1.Condition
   map:
     fields:

@@ -1811,7 +1811,7 @@ var _ = ginkgo.Describe("Cluster Manager", func() {
 							Transport: udnv1.TransportOptionEVPN,
 							EVPN: &udnv1.EVPNConfig{
 								VTEP: "vtep-a",
-								IPVRF: &udnv1.VRFConfig{
+								IPVRF: &apitypes.VRFConfig{
 									VNI: 200,
 								},
 							},
@@ -1998,7 +1998,7 @@ var _ = ginkgo.Describe("Cluster Manager", func() {
 							Transport: udnv1.TransportOptionEVPN,
 							EVPN: &udnv1.EVPNConfig{
 								VTEP: "vtep-failed",
-								IPVRF: &udnv1.VRFConfig{
+								IPVRF: &apitypes.VRFConfig{
 									VNI: 300,
 								},
 							},
