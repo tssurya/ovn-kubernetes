@@ -24,6 +24,7 @@ import (
 	"k8s.io/klog/v2"
 
 	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/allocator/id"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/clustermanager/evpnregistry"
 	controllerutil "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/controller"
 	networkconnectv1 "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/clusternetworkconnect/v1"
 	networkconnectclientset "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/clusternetworkconnect/v1/apis/clientset/versioned"
@@ -105,6 +106,10 @@ type Controller struct {
 	// (connecting EVPN-type CUDNs) parent VRF VIDs are drawn from the same
 	// cluster-wide 1-4094 pool.
 	vidAllocator id.Allocator
+	// vniRegistry is the cluster-wide per-VTEP VNI conflict-detection registry
+	// shared with the UDN controller to prevent CUDN and CNC parent VRF VNIs
+	// from colliding on the same VTEP.
+	vniRegistry *evpnregistry.Registry
 }
 
 func NewController(
@@ -113,6 +118,7 @@ func NewController(
 	networkManager networkmanager.Interface,
 	tunnelKeysAllocator *id.TunnelKeysAllocator,
 	vidAllocator id.Allocator,
+	vniRegistry *evpnregistry.Registry,
 ) *Controller {
 	cncLister := wf.ClusterNetworkConnectInformer().Lister()
 	nadLister := wf.NADInformer().Lister()
@@ -127,6 +133,7 @@ func NewController(
 		cncCache:            make(map[string]*clusterNetworkConnectState),
 		tunnelKeysAllocator: tunnelKeysAllocator,
 		vidAllocator:        vidAllocator,
+		vniRegistry:         vniRegistry,
 	}
 
 	cncCfg := &controllerutil.ControllerConfig[networkconnectv1.ClusterNetworkConnect]{

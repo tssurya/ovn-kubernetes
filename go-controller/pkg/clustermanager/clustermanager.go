@@ -246,7 +246,7 @@ func NewClusterManager(
 	}
 
 	if util.IsNetworkConnectEnabled() {
-		cm.networkConnectController = networkconnect.NewController(wf, ovnClient, cm.networkManager.Interface(), tunnelKeysAllocator, vidAllocator)
+		cm.networkConnectController = networkconnect.NewController(wf, ovnClient, cm.networkManager.Interface(), tunnelKeysAllocator, vidAllocator, vniRegistry)
 	}
 	if util.IsUplinkEnabled() {
 		cm.uplinkController = uplinkcontroller.NewController(

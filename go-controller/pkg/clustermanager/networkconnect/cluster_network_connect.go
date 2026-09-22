@@ -161,7 +161,12 @@ func (c *Controller) syncClusterNetworkConnect(cncName string, cnc *networkconne
 					c.vidAllocator.ReleaseID(EVPNParentVRFVIDKey(cncName))
 					klog.V(4).Infof("Released parent VRF VID for deleted CNC %s", cncName)
 				}
-				// TODO: release parent VRF VNI via VNI reserver (next commit)
+			}
+			if cncState.evpnParentVRFVNI != 0 {
+				if c.vniRegistry != nil {
+					c.vniRegistry.Release(cncName)
+					klog.V(4).Infof("Released parent VRF VNI for deleted CNC %s", cncName)
+				}
 			}
 		}
 
@@ -327,8 +332,22 @@ func (c *Controller) syncEVPNCNCResources(
 	if cnc.Spec.EVPNConfiguration == nil {
 		return fmt.Errorf("%w: EVPN CNC %s has no evpnConfiguration", errConfig, cnc.Name)
 	}
-	// TODO: VNI conflict check via VNI reserver (next commit)
-	// parentVNI := cnc.Spec.EVPNConfiguration.IPVRF.VNI
+	// VNI conflict check — idempotent: re-reserving the same owner+VNI is a no-op.
+	// The VTEP is determined from the selected networks (all share the same VTEP for EVPN CNCs).
+	if c.vniRegistry != nil && cncState.evpnParentVRFVNI == 0 {
+		parentVNI := cnc.Spec.EVPNConfiguration.IPVRF.VNI
+		vtep := vtepFromNetworks(discoveredNetworks)
+		if vtep == "" && len(discoveredNetworks) > 0 {
+			return fmt.Errorf("CNC %s: could not determine VTEP from selected networks", cnc.Name)
+		}
+		if vtep != "" && parentVNI != 0 {
+			if err := c.vniRegistry.Reserve(cnc.Name, vtep, parentVNI); err != nil {
+				return fmt.Errorf("CNC %s parent VRF VNI conflict: %w", cnc.Name, err)
+			}
+			cncState.evpnParentVRFVNI = parentVNI
+			klog.V(5).Infof("CNC %s: reserved parent VRF VNI %d on VTEP %s", cnc.Name, parentVNI, vtep)
+		}
+	}
 
 	// VID allocation — idempotent: AllocateID returns the existing ID if already allocated.
 	if c.vidAllocator != nil && cncState.evpnParentVRFVID == 0 {
