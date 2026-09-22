@@ -831,7 +831,7 @@ func TestController_reconcileClusterNetworkConnect(t *testing.T) {
 
 			tunnelKeysAllocator := id.NewTunnelKeyAllocator("TunnelKeys")
 
-			c := NewController(wf, fakeClientset, fakeNM.Interface(), tunnelKeysAllocator)
+			c := NewController(wf, fakeClientset, fakeNM.Interface(), tunnelKeysAllocator, nil)
 
 			// Pre-populate cache for deletion test
 			if tt.expectCacheEntryDeleted {
@@ -1223,7 +1223,7 @@ func TestController_reconcileNAD(t *testing.T) {
 			}
 
 			tunnelKeysAllocator := id.NewTunnelKeyAllocator("TunnelKeys")
-			c := NewController(wf, fakeClientset, fakeNM.Interface(), tunnelKeysAllocator)
+			c := NewController(wf, fakeClientset, fakeNM.Interface(), tunnelKeysAllocator, nil)
 
 			// Pre-populate cache
 			for name, state := range tt.prePopulateCache {
@@ -1708,7 +1708,7 @@ func TestMustProcessCNCForNAD(t *testing.T) {
 			}
 
 			tunnelKeysAllocator := id.NewTunnelKeyAllocator("TunnelKeys")
-			c := NewController(wf, fakeClientset, fakeNM.Interface(), tunnelKeysAllocator)
+			c := NewController(wf, fakeClientset, fakeNM.Interface(), tunnelKeysAllocator, nil)
 
 			// Pre-populate cache if provided
 			if tt.cncCacheState != nil {
@@ -2421,7 +2421,7 @@ func TestController_reconcileNamespace(t *testing.T) {
 			}
 
 			tunnelKeysAllocator := id.NewTunnelKeyAllocator("TunnelKeys")
-			c := NewController(wf, fakeClientset, fakeNM.Interface(), tunnelKeysAllocator)
+			c := NewController(wf, fakeClientset, fakeNM.Interface(), tunnelKeysAllocator, nil)
 
 			// Pre-populate cache
 			for name, state := range tt.prePopulateCache {
@@ -2721,7 +2721,7 @@ func TestController_initialSync(t *testing.T) {
 			}
 
 			tunnelKeysAllocator := id.NewTunnelKeyAllocator("TunnelKeys")
-			c := NewController(wf, fakeClientset, fakeNM.Interface(), tunnelKeysAllocator)
+			c := NewController(wf, fakeClientset, fakeNM.Interface(), tunnelKeysAllocator, nil)
 
 			// Run initialSync
 			err = c.initialSync()

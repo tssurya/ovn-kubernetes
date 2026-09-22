@@ -155,6 +155,14 @@ func (c *Controller) syncClusterNetworkConnect(cncName string, cnc *networkconne
 				c.tunnelKeysAllocator.ReleaseKeys(cncName)
 				klog.V(4).Infof("Released tunnel key for deleted CNC %s", cncName)
 			}
+			// Release EVPN parent VRF resources — only allocated for EVPN CNCs
+			if cncState.evpnParentVRFVID != 0 {
+				if c.vidAllocator != nil {
+					c.vidAllocator.ReleaseID(EVPNParentVRFVIDKey(cncName))
+					klog.V(4).Infof("Released parent VRF VID for deleted CNC %s", cncName)
+				}
+				// TODO: release parent VRF VNI via VNI reserver (next commit)
+			}
 		}
 
 		// Clean up the cache
@@ -211,7 +219,11 @@ func (c *Controller) syncClusterNetworkConnect(cncName string, cnc *networkconne
 
 	if transport == ovntypes.NetworkTransportEVPN {
 		// EVPN path: no connect-router, no connectSubnets allocation.
-		// Just track which NADs are selected; selectedNetworks stays empty (no owner keys for EVPN).
+		// Perform VNI conflict check and VID allocation for the parent VRF.
+		if err := c.syncEVPNCNCResources(cnc, cncState, discoveredNetworks); err != nil {
+			errs = append(errs, err)
+		}
+		// Track which NADs are selected; selectedNetworks stays empty (no owner keys for EVPN).
 		cncState.selectedNADs = allMatchingNADKeys
 		klog.V(5).Infof("CNC %s: EVPN transport, selected %d NADs", cncName, allMatchingNADKeys.Len())
 		return kerrors.NewAggregate(errs)
@@ -283,6 +295,55 @@ func (c *Controller) syncClusterNetworkConnect(cncName string, cnc *networkconne
 	cncState.selectedNetworks = allMatchingNetworkKeys
 	klog.V(5).Infof("Updated selectedNetworks cache for CNC %s with %d networks", cncName, allMatchingNetworkKeys.Len())
 	return kerrors.NewAggregate(errs)
+}
+
+// EVPNParentVRFVIDKey returns the vidAllocator key for a CNC's parent VRF VID.
+// Exported so clustermanager can pre-seed the allocator on startup.
+func EVPNParentVRFVIDKey(cncName string) string {
+	return cncName + "/parentvrf"
+}
+
+
+// vtepFromNetworks returns the VTEP name used by the first discovered network.
+// For EVPN CNCs, all networks share the same VTEP (multi-VTEP is a known limitation).
+// Returns empty string if no networks are discovered yet.
+func vtepFromNetworks(networks []util.NetInfo) string {
+	for _, n := range networks {
+		if v := n.EVPNVTEPName(); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// syncEVPNCNCResources handles VNI conflict detection, VID allocation, and annotation
+// writing for EVPN-transport CNCs. It is idempotent: already-allocated resources are
+// not re-allocated.
+func (c *Controller) syncEVPNCNCResources(
+	cnc *networkconnectv1.ClusterNetworkConnect,
+	cncState *clusterNetworkConnectState,
+	discoveredNetworks []util.NetInfo,
+) error {
+	if cnc.Spec.EVPNConfiguration == nil {
+		return fmt.Errorf("%w: EVPN CNC %s has no evpnConfiguration", errConfig, cnc.Name)
+	}
+	// TODO: VNI conflict check via VNI reserver (next commit)
+	// parentVNI := cnc.Spec.EVPNConfiguration.IPVRF.VNI
+
+	// VID allocation — idempotent: AllocateID returns the existing ID if already allocated.
+	if c.vidAllocator != nil && cncState.evpnParentVRFVID == 0 {
+		vid, err := c.vidAllocator.AllocateID(EVPNParentVRFVIDKey(cnc.Name))
+		if err != nil {
+			return fmt.Errorf("CNC %s: failed to allocate parent VRF VID: %w", cnc.Name, err)
+		}
+		cncState.evpnParentVRFVID = vid
+		klog.V(5).Infof("CNC %s: allocated parent VRF VID %d", cnc.Name, vid)
+
+		if err := util.UpdateNetworkConnectEVPNParentVRFAnnotation(cnc.Name, c.cncClient, vid); err != nil {
+			return fmt.Errorf("CNC %s: failed to write parent VRF VID annotation: %w", cnc.Name, err)
+		}
+	}
+	return nil
 }
 
 // detectTransport inspects discovered networks and returns the single transport type in use.

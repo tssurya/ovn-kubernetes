@@ -68,6 +68,13 @@ type clusterNetworkConnectState struct {
 	selectedNetworks sets.Set[string]
 	// tunnelID for this CNC's connect router (Geneve transport only)
 	tunnelID int
+
+	// evpnParentVRFVNI is the L3VNI for the parent VRF (EVPN transport only).
+	// Non-zero only after VNI conflict validation passes.
+	evpnParentVRFVNI int32
+	// evpnParentVRFVID is the VLAN ID allocated for the parent VRF L3 SVI (EVPN transport only).
+	// Non-zero only after a VID has been successfully allocated.
+	evpnParentVRFVID int
 }
 
 type Controller struct {
@@ -94,6 +101,10 @@ type Controller struct {
 	// holds the state for each CNC keyed by CNC name
 	cncCache            map[string]*clusterNetworkConnectState
 	tunnelKeysAllocator *id.TunnelKeysAllocator
+	// vidAllocator is shared with the UDN controller so EVPN CUDN and CNC
+	// (connecting EVPN-type CUDNs) parent VRF VIDs are drawn from the same
+	// cluster-wide 1-4094 pool.
+	vidAllocator id.Allocator
 }
 
 func NewController(
@@ -101,6 +112,7 @@ func NewController(
 	ovnClient *util.OVNClusterManagerClientset,
 	networkManager networkmanager.Interface,
 	tunnelKeysAllocator *id.TunnelKeysAllocator,
+	vidAllocator id.Allocator,
 ) *Controller {
 	cncLister := wf.ClusterNetworkConnectInformer().Lister()
 	nadLister := wf.NADInformer().Lister()
@@ -114,6 +126,7 @@ func NewController(
 		networkManager:      networkManager,
 		cncCache:            make(map[string]*clusterNetworkConnectState),
 		tunnelKeysAllocator: tunnelKeysAllocator,
+		vidAllocator:        vidAllocator,
 	}
 
 	cncCfg := &controllerutil.ControllerConfig[networkconnectv1.ClusterNetworkConnect]{

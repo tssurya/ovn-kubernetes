@@ -23,8 +23,10 @@ import (
 const (
 	ovnNetworkConnectSubnetAnnotation          = "k8s.ovn.org/network-connect-subnet"
 	OvnConnectRouterTunnelKeyAnnotation        = "k8s.ovn.org/connect-router-tunnel-key"
+	OvnCNCEVPNParentVRFVIDAnnotation           = "k8s.ovn.org/evpn-parent-vrf-vid"
 	networkConnectSubnetAnnotationFieldManager = "ovn-kubernetes-network-connect-controller-subnet-annotation"
 	networkConnectRouterTunnelKeyFieldManager  = "ovn-kubernetes-network-connect-controller-tunnel-key-annotation"
+	networkConnectEVPNParentVRFFieldManager    = "ovn-kubernetes-network-connect-controller-evpn-parent-vrf"
 )
 
 // ComputeNetworkOwner returns a unique owner key for a network based on its topology type and ID.
@@ -191,4 +193,40 @@ func NetworkConnectTunnelKeyAnnotationsChanged(oldObj, newObj *networkconnectv1.
 		return true
 	}
 	return oldObj.Annotations[OvnConnectRouterTunnelKeyAnnotation] != newObj.Annotations[OvnConnectRouterTunnelKeyAnnotation]
+}
+
+// UpdateNetworkConnectEVPNParentVRFAnnotation writes the allocated VID for the EVPN parent VRF
+// to the CNC annotation so node controllers can create the L3 SVI with the correct VLAN ID.
+func UpdateNetworkConnectEVPNParentVRFAnnotation(cncName string, cncClient networkconnectclientset.Interface, vid int) error {
+	applyObj := networkconnectapply.ClusterNetworkConnect(cncName).
+		WithAnnotations(map[string]string{
+			OvnCNCEVPNParentVRFVIDAnnotation: strconv.Itoa(vid),
+		})
+	_, err := cncClient.K8sV1().ClusterNetworkConnects().Apply(
+		context.TODO(),
+		applyObj,
+		metav1.ApplyOptions{FieldManager: networkConnectEVPNParentVRFFieldManager, Force: true},
+	)
+	if err != nil {
+		return fmt.Errorf("failed to apply CNC EVPN parent VRF VID annotation: %v", err)
+	}
+	klog.V(5).Infof("Updated EVPN parent VRF VID annotation for CNC %s with VID %d", cncName, vid)
+	return nil
+}
+
+// ParseNetworkConnectEVPNParentVRFVIDAnnotation parses the EVPN parent VRF VID annotation.
+// Returns 0 if annotation is absent.
+func ParseNetworkConnectEVPNParentVRFVIDAnnotation(cnc *networkconnectv1.ClusterNetworkConnect) (int, error) {
+	if cnc == nil || cnc.Annotations == nil {
+		return 0, nil
+	}
+	raw, ok := cnc.Annotations[OvnCNCEVPNParentVRFVIDAnnotation]
+	if !ok {
+		return 0, nil
+	}
+	vid, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0, fmt.Errorf("invalid EVPN parent VRF VID annotation %q: %w", raw, err)
+	}
+	return vid, nil
 }

@@ -138,7 +138,7 @@ var _ = ginkgo.Describe("NetworkConnect ClusterManager Controller Integration Te
 
 		networkManager, err = networkmanager.NewForCluster(&networkmanager.FakeControllerManager{}, wf, fakeClientset, nil, tunnelKeysAllocator)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
-		controller = NewController(wf, fakeClientset, networkManager.Interface(), tunnelKeysAllocator)
+		controller = NewController(wf, fakeClientset, networkManager.Interface(), tunnelKeysAllocator, nil)
 
 		err = wf.Start()
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
@@ -1479,7 +1479,7 @@ var _ = ginkgo.Describe("NetworkConnect ClusterManager Controller Integration Te
 				controller.Stop()
 
 				tunnelKeysAllocator := id.NewTunnelKeyAllocator("TunnelKeys")
-				controller = NewController(wf, fakeClientset, networkManager.Interface(), tunnelKeysAllocator)
+				controller = NewController(wf, fakeClientset, networkManager.Interface(), tunnelKeysAllocator, nil)
 				gomega.Expect(controller.Start()).To(gomega.Succeed())
 				checkAcceptedConditionEventually(cncName, "selected networks have overlapping subnets")
 				gomega.Consistently(func() error {
@@ -1570,7 +1570,7 @@ var _ = ginkgo.Describe("NetworkConnect ClusterManager Controller Integration Te
 				// now restart the controller and check that the same subnet is still allocated (allocation preserved across restarts)
 				controller.Stop()
 				tunnelKeysAllocator := id.NewTunnelKeyAllocator("TunnelKeys")
-				controller = NewController(wf, fakeClientset, networkManager.Interface(), tunnelKeysAllocator)
+				controller = NewController(wf, fakeClientset, networkManager.Interface(), tunnelKeysAllocator, nil)
 				gomega.Expect(controller.Start()).To(gomega.Succeed())
 				// check status and subnets are the same
 				gomega.Consistently(func() error {
@@ -1844,7 +1844,7 @@ var _ = ginkgo.Describe("NetworkConnect ClusterManager Controller InitialSync Te
 
 				networkManager, err := networkmanager.NewForCluster(&networkmanager.FakeControllerManager{}, wf, fakeClientset, nil, tunnelKeysAllocator)
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
-				controller := NewController(wf, fakeClientset, networkManager.Interface(), tunnelKeysAllocator)
+				controller := NewController(wf, fakeClientset, networkManager.Interface(), tunnelKeysAllocator, nil)
 
 				err = wf.Start()
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
@@ -2062,7 +2062,7 @@ var _ = ginkgo.Describe("NetworkConnect ClusterManager Controller InitialSync Te
 				networkManager2, err := networkmanager.NewForCluster(&networkmanager.FakeControllerManager{}, wf2, fakeClientset, nil, tunnelKeysAllocator2)
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
-				controller2 := NewController(wf2, fakeClientset, networkManager2.Interface(), tunnelKeysAllocator2)
+				controller2 := NewController(wf2, fakeClientset, networkManager2.Interface(), tunnelKeysAllocator2, nil)
 
 				err = wf2.Start()
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())

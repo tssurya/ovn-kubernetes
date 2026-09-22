@@ -34,9 +34,9 @@ import (
 	vtepcontroller "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/clustermanager/vtep"
 	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/config"
 	nodecontroller "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/controllers/node"
-	networkconnectclientset "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/clusternetworkconnect/v1/apis/clientset/versioned"
-	udnv1 "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/userdefinednetwork/v1"
+	networkconnectv1 "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/clusternetworkconnect/v1"
 	rainformer "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/routeadvertisements/v1/apis/informers/externalversions/routeadvertisements/v1"
+	udnv1 "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/userdefinednetwork/v1"
 	vtepinformer "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/vtep/v1/apis/informers/externalversions/vtep/v1"
 	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/factory"
 	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/kube"
@@ -120,7 +120,16 @@ func NewClusterManager(
 		// for Connecting UDNs. So we initialize it here and pass it to the networkManager.
 		// The same instance should be initialized only once and passed to all the
 		// users of tunnel-keys.
-		tunnelKeysAllocator, err = initTunnelKeysAllocator(existingNADs.Items, ovnClient.NetworkConnectClient)
+		var existingCNCs []networkconnectv1.ClusterNetworkConnect
+		if util.IsNetworkConnectEnabled() {
+			cncList, err := ovnClient.NetworkConnectClient.K8sV1().ClusterNetworkConnects().List(context.TODO(), metav1.ListOptions{})
+			if err != nil {
+				return nil, fmt.Errorf("failed to list CNCs for allocator pre-seeding: %w", err)
+			}
+			existingCNCs = cncList.Items
+		}
+
+		tunnelKeysAllocator, err = initTunnelKeysAllocator(existingNADs.Items, existingCNCs)
 		if err != nil {
 			return nil, fmt.Errorf("failed to initialize tunnel keys allocator: %w", err)
 		}
@@ -129,7 +138,7 @@ func NewClusterManager(
 			if err != nil {
 				return nil, fmt.Errorf("failed to list CUDNs for VID allocator pre-seeding: %w", err)
 			}
-			vidAllocator, err = initVIDAllocator(existingNADs.Items, existingCUDNs.Items)
+			vidAllocator, err = initVIDAllocator(existingNADs.Items, existingCUDNs.Items, existingCNCs)
 			if err != nil {
 				return nil, fmt.Errorf("failed to initialize VID allocator: %w", err)
 			}
@@ -233,7 +242,7 @@ func NewClusterManager(
 	}
 
 	if util.IsNetworkConnectEnabled() {
-		cm.networkConnectController = networkconnect.NewController(wf, ovnClient, cm.networkManager.Interface(), tunnelKeysAllocator)
+		cm.networkConnectController = networkconnect.NewController(wf, ovnClient, cm.networkManager.Interface(), tunnelKeysAllocator, vidAllocator)
 	}
 	if util.IsUplinkEnabled() {
 		cm.uplinkController = uplinkcontroller.NewController(
@@ -431,10 +440,11 @@ func (cm *ClusterManager) Reconcile(name string, old, new util.NetInfo) error {
 	return nil
 }
 
-// initVIDAllocator creates and pre-seeds the cluster-wide VID allocator from existing NADs.
+// initVIDAllocator creates and pre-seeds the cluster-wide VID allocator from existing NADs and CNCs.
 // Must be called before any controller starts to prevent VID re-allocation on restart.
-// Key format matches udncontroller.MACVRFVIDKey / IPVRFVIDKey (object name, not network name).
-func initVIDAllocator(existingNADs []nettypes.NetworkAttachmentDefinition, existingCUDNs []udnv1.ClusterUserDefinedNetwork) (id.Allocator, error) {
+// Key format matches udncontroller.MACVRFVIDKey / IPVRFVIDKey (object name, not network name)
+// and networkconnect.EVPNParentVRFVIDKey (CNC name).
+func initVIDAllocator(existingNADs []nettypes.NetworkAttachmentDefinition, existingCUDNs []udnv1.ClusterUserDefinedNetwork, existingCNCs []networkconnectv1.ClusterNetworkConnect) (id.Allocator, error) {
 	// Allocates VIDs in range 1-4094 (0 is reserved per IEEE 802.1Q).
 	vidAllocator := id.NewIDAllocator("EVPN-VIDs", udncontroller.MaxEVPNVIDs)
 	if err := vidAllocator.ReserveID(udncontroller.ReservedVIDZeroKey, 0); err != nil {
@@ -501,6 +511,21 @@ func initVIDAllocator(existingNADs []nettypes.NetworkAttachmentDefinition, exist
 				nad.Namespace, nad.Name, errors.Join(errs...))
 		}
 	}
+
+	// Seed VIDs from existing CNCs (parent VRF VID stored in annotation).
+	for _, cnc := range existingCNCs {
+		vid, err := util.ParseNetworkConnectEVPNParentVRFVIDAnnotation(&cnc)
+		if err != nil || vid == 0 {
+			// No annotation yet (CNC not yet reconciled) — skip.
+			continue
+		}
+		if err := vidAllocator.ReserveID(networkconnect.EVPNParentVRFVIDKey(cnc.Name), vid); err != nil {
+			klog.Errorf("VID pre-seed: CNC %s VID %d conflict: %v (CNC will be reconciled)", cnc.Name, vid, err)
+		} else {
+			klog.V(4).Infof("VID pre-seed: recovered parent VRF VID %d for CNC %s", vid, cnc.Name)
+		}
+	}
+
 	return vidAllocator, nil
 }
 
@@ -508,7 +533,7 @@ func initVIDAllocator(existingNADs []nettypes.NetworkAttachmentDefinition, exist
 // It will be shared across multiple controllers and should account for different object types.
 // Good news is that we don't care about missing events, because we only need to reserve ids that are already
 // annotated, and no one else can annotate them except ClusterManager.
-func initTunnelKeysAllocator(existingNADs []nettypes.NetworkAttachmentDefinition, cncClient networkconnectclientset.Interface) (*id.TunnelKeysAllocator, error) {
+func initTunnelKeysAllocator(existingNADs []nettypes.NetworkAttachmentDefinition, existingCNCs []networkconnectv1.ClusterNetworkConnect) (*id.TunnelKeysAllocator, error) {
 	tunnelKeysAllocator := id.NewTunnelKeyAllocator("TunnelKeys")
 
 	for _, nad := range existingNADs {
@@ -533,20 +558,14 @@ func initTunnelKeysAllocator(existingNADs []nettypes.NetworkAttachmentDefinition
 			}
 		}
 	}
-	if util.IsNetworkConnectEnabled() {
-		existingCNCs, err := cncClient.K8sV1().ClusterNetworkConnects().List(context.TODO(), metav1.ListOptions{})
+	for _, cnc := range existingCNCs {
+		tunnelID, err := util.ParseNetworkConnectTunnelKeyAnnotation(&cnc)
 		if err != nil {
-			return nil, fmt.Errorf("failed to list existing CNCs: %w", err)
+			return nil, fmt.Errorf("failed to parse annotated tunnel ID: %w", err)
 		}
-		for _, cnc := range existingCNCs.Items {
-			tunnelID, err := util.ParseNetworkConnectTunnelKeyAnnotation(&cnc)
-			if err != nil {
-				return nil, fmt.Errorf("failed to parse annotated tunnel ID: %w", err)
-			}
-			if tunnelID != 0 {
-				if err = tunnelKeysAllocator.ReserveKeys(cnc.Name, []int{tunnelID}); err != nil {
-					return nil, fmt.Errorf("failed to reserve tunnel ID %d for CNC %s: %w", tunnelID, cnc.Name, err)
-				}
+		if tunnelID != 0 {
+			if err = tunnelKeysAllocator.ReserveKeys(cnc.Name, []int{tunnelID}); err != nil {
+				return nil, fmt.Errorf("failed to reserve tunnel ID %d for CNC %s: %w", tunnelID, cnc.Name, err)
 			}
 		}
 	}
