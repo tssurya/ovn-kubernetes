@@ -27,6 +27,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/allocator/id"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/clustermanager/evpnregistry"
 	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/clustermanager/userdefinednetwork/template"
 	ovncnitypes "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/cni/types"
 	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/config"
@@ -94,7 +95,7 @@ var _ = Describe("User Defined Network Controller", func() {
 		}
 		return New(cs.NetworkAttchDefClient, f.NADInformer(),
 			cs.UserDefinedNetworkClient, f.UserDefinedNetworkInformer(), f.ClusterUserDefinedNetworkInformer(),
-			renderNADStub, networkManager.Interface(), f.PodCoreInformer(), f.NamespaceInformer(), vtepInformer, f.RouteAdvertisementsInformer(), newTestVIDAllocator(), nil,
+			renderNADStub, networkManager.Interface(), f.PodCoreInformer(), f.NamespaceInformer(), vtepInformer, f.RouteAdvertisementsInformer(), newTestVIDAllocator(), evpnregistry.New(), nil,
 		)
 	}
 
@@ -117,7 +118,7 @@ var _ = Describe("User Defined Network Controller", func() {
 		}
 		return New(cs.NetworkAttchDefClient, f.NADInformer(),
 			cs.UserDefinedNetworkClient, f.UserDefinedNetworkInformer(), f.ClusterUserDefinedNetworkInformer(),
-			renderNADStub, nm.Interface(), f.PodCoreInformer(), f.NamespaceInformer(), vtepInformer, f.RouteAdvertisementsInformer(), newTestVIDAllocator(), nil,
+			renderNADStub, nm.Interface(), f.PodCoreInformer(), f.NamespaceInformer(), vtepInformer, f.RouteAdvertisementsInformer(), newTestVIDAllocator(), evpnregistry.New(), nil,
 		)
 	}
 

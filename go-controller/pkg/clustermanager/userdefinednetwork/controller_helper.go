@@ -211,8 +211,8 @@ func (c *Controller) allocateEVPNIDsIfNeeded(obj client.Object) ([]template.Rend
 
 	networkName := obj.GetName()
 
-	// ptr.Deref yields zero-value VRFConfig for nil VRFs, reserveVNIs skips VNI 0
-	if err := c.reserveVNIs(networkName, evpnCfg.VTEP, ptr.Deref(evpnCfg.MACVRF, crdtypes.VRFConfig{}).VNI, ptr.Deref(evpnCfg.IPVRF, crdtypes.VRFConfig{}).VNI); err != nil {
+	// ptr.Deref yields zero-value VRFConfig for nil VRFs, vniRegistry.Reserve skips VNI 0
+	if err := c.vniRegistry.Reserve(networkName, evpnCfg.VTEP, ptr.Deref(evpnCfg.MACVRF, crdtypes.VRFConfig{}).VNI, ptr.Deref(evpnCfg.IPVRF, crdtypes.VRFConfig{}).VNI); err != nil {
 		return nil, fmt.Errorf("failed to reserve VNIs: %w", err)
 	}
 

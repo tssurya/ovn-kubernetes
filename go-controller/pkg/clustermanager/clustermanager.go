@@ -21,6 +21,7 @@ import (
 
 	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/allocator/id"
 	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/clustermanager/dnsnameresolver"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/clustermanager/evpnregistry"
 	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/clustermanager/egressservice"
 	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/clustermanager/endpointslicemirror"
 	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/clustermanager/managedbgp"
@@ -108,6 +109,7 @@ func NewClusterManager(
 		err                 error
 		tunnelKeysAllocator *id.TunnelKeysAllocator
 		vidAllocator        id.Allocator
+		vniRegistry         *evpnregistry.Registry
 	)
 	if config.OVNKubernetesFeature.EnableMultiNetwork {
 		// List NADs once from kubernetes API server; both tunnel-key and VID allocators need it.
@@ -142,6 +144,7 @@ func NewClusterManager(
 			if err != nil {
 				return nil, fmt.Errorf("failed to initialize VID allocator: %w", err)
 			}
+			vniRegistry = initVNIRegistry(existingNADs.Items)
 		}
 
 		cm.networkManager, err = networkmanager.NewForCluster(cm, wf, ovnClient, recorder, tunnelKeysAllocator)
@@ -233,6 +236,7 @@ func NewClusterManager(
 			vtepInformer,
 			raInformer,
 			vidAllocator,
+			vniRegistry,
 			cm.recorder,
 		)
 		cm.userDefinedNetworkController = udnController
@@ -527,6 +531,41 @@ func initVIDAllocator(existingNADs []nettypes.NetworkAttachmentDefinition, exist
 	}
 
 	return vidAllocator, nil
+}
+
+// initVNIRegistry creates and pre-seeds the cluster-wide EVPN VNI conflict-detection
+// registry from existing EVPN NADs. Must be called before any controller starts.
+// CNC parent VRF VNIs are seeded at first reconcile (VTEP is not available at CM startup
+// without cross-referencing selected NADs; first reconcile is race-free for CNCs).
+func initVNIRegistry(existingNADs []nettypes.NetworkAttachmentDefinition) *evpnregistry.Registry {
+	registry := evpnregistry.New()
+	for _, nad := range existingNADs {
+		netConf, err := util.ParseNetConf(&nad)
+		if err != nil {
+			if err.Error() == util.ErrorAttachDefNotOvnManaged.Error() {
+				continue
+			}
+			klog.Warningf("VNI pre-seed: failed to parse NAD %s/%s: %v", nad.Namespace, nad.Name, err)
+			continue
+		}
+		if netConf.EVPN == nil || netConf.EVPN.VTEP == "" {
+			continue
+		}
+		macVNI := int32(0)
+		ipVNI := int32(0)
+		if netConf.EVPN.MACVRF != nil {
+			macVNI = netConf.EVPN.MACVRF.VNI
+		}
+		if netConf.EVPN.IPVRF != nil {
+			ipVNI = netConf.EVPN.IPVRF.VNI
+		}
+		if err := registry.Reserve(nad.Name, netConf.EVPN.VTEP, macVNI, ipVNI); err != nil {
+			klog.Errorf("VNI pre-seed: NAD %s/%s conflict: %v (will be reconciled)", nad.Namespace, nad.Name, err)
+		} else {
+			klog.V(4).Infof("VNI pre-seed: reserved VNIs for NAD %s/%s (VTEP %s)", nad.Namespace, nad.Name, netConf.EVPN.VTEP)
+		}
+	}
+	return registry
 }
 
 // initTunnelKeysAllocator reserves any existing tunnel keys to avoid re-allocation.

@@ -1033,7 +1033,7 @@ var _ = ginkgo.Describe("Cluster Manager", func() {
 				clientSet := util.GetOVNClientset(nad1, nad2)
 
 				// init the allocator that should reserve already allocated keys for test1
-				allocator, err := initTunnelKeysAllocator(mustListNADs(clientSet.NetworkAttchDefClient), clientSet.NetworkConnectClient)
+				allocator, err := initTunnelKeysAllocator(mustListNADs(clientSet.NetworkAttchDefClient), nil)
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 				// check that reserving different keys for test2 will fail
 				err = allocator.ReserveKeys("test1", []int{16711685, 16715779})
@@ -1086,7 +1086,7 @@ var _ = ginkgo.Describe("Cluster Manager", func() {
 				clientSet := util.GetOVNClientset(cnc1, cnc2)
 
 				// init the allocator that should reserve already allocated key for cnc1
-				allocator, err := initTunnelKeysAllocator(mustListNADs(clientSet.NetworkAttchDefClient), clientSet.NetworkConnectClient)
+				allocator, err := initTunnelKeysAllocator(mustListNADs(clientSet.NetworkAttchDefClient), nil)
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 				// check that reserving different keys for cnc1 will fail
 				err = allocator.ReserveKeys("cnc1", []int{16715780})
@@ -1140,7 +1140,7 @@ var _ = ginkgo.Describe("Cluster Manager", func() {
 				clientSet := util.GetOVNClientset(nad1, cnc1)
 
 				// init the allocator that should reserve keys for both NAD and CNC
-				allocator, err := initTunnelKeysAllocator(mustListNADs(clientSet.NetworkAttchDefClient), clientSet.NetworkConnectClient)
+				allocator, err := initTunnelKeysAllocator(mustListNADs(clientSet.NetworkAttchDefClient), nil)
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 				// verify NAD keys are reserved (networkID 2 => first key from preserved range)
 				ids, err := allocator.AllocateKeys("test1", 2, 2)
@@ -2189,7 +2189,7 @@ func mustListCUDNs(cs *util.OVNClientset) []udnv1.ClusterUserDefinedNetwork {
 
 var _ = ginkgo.Describe("initVIDAllocator", func() {
 	ginkgo.It("pre-seeds VID 0 and 1 as reserved", func() {
-		alloc, err := initVIDAllocator(nil, nil)
+		alloc, err := initVIDAllocator(nil, nil, nil)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		gomega.Expect(alloc.ReserveID("any-key", 0)).To(gomega.MatchError(gomega.ContainSubstring("already reserved")))
 		gomega.Expect(alloc.ReserveID("any-key", 1)).To(gomega.MatchError(gomega.ContainSubstring("already reserved")))
@@ -2200,7 +2200,7 @@ var _ = ginkgo.Describe("initVIDAllocator", func() {
 			`{"cniVersion":"1.1.0","name":"cluster_udn_evpn-recovery","type":"ovn-k8s-cni-overlay","netAttachDefName":"test-ns/evpn-recovery","topology":"layer2","role":"primary","subnets":"10.10.0.0/16","transport":"evpn","evpn":{"vtep":"vtep1","macVRF":{"vni":100,"vid":42}}}`)
 		clientSet := util.GetOVNClientset(nad)
 
-		alloc, err := initVIDAllocator(mustListNADs(clientSet.NetworkAttchDefClient), nil)
+		alloc, err := initVIDAllocator(mustListNADs(clientSet.NetworkAttchDefClient), nil, nil)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		gomega.Expect(alloc.GetID(udncontroller.MACVRFVIDKey("evpn-recovery"))).To(gomega.Equal(42))
 	})
@@ -2210,7 +2210,7 @@ var _ = ginkgo.Describe("initVIDAllocator", func() {
 			`{"cniVersion":"1.1.0","name":"cluster_udn_irb-recovery","type":"ovn-k8s-cni-overlay","netAttachDefName":"test-ns/irb-recovery","topology":"layer2","role":"primary","subnets":"10.10.0.0/16","transport":"evpn","evpn":{"vtep":"vtep1","macVRF":{"vni":100,"vid":3},"ipVRF":{"vni":200,"vid":7}}}`)
 		clientSet := util.GetOVNClientset(nad)
 
-		alloc, err := initVIDAllocator(mustListNADs(clientSet.NetworkAttchDefClient), nil)
+		alloc, err := initVIDAllocator(mustListNADs(clientSet.NetworkAttchDefClient), nil, nil)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		gomega.Expect(alloc.GetID(udncontroller.MACVRFVIDKey("irb-recovery"))).To(gomega.Equal(3))
 		gomega.Expect(alloc.GetID(udncontroller.IPVRFVIDKey("irb-recovery"))).To(gomega.Equal(7))
@@ -2232,7 +2232,7 @@ var _ = ginkgo.Describe("initVIDAllocator", func() {
 		}}
 		clientSet := util.GetOVNClientset(nad1, nad2, cudn1, cudn2)
 
-		alloc, err := initVIDAllocator(mustListNADs(clientSet.NetworkAttchDefClient), mustListCUDNs(clientSet))
+		alloc, err := initVIDAllocator(mustListNADs(clientSet.NetworkAttchDefClient), mustListCUDNs(clientSet), nil)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		gomega.Expect(alloc.GetID(udncontroller.MACVRFVIDKey("cudn-a"))).To(gomega.Equal(42), "older CUDN should hold VID 42")
 		gomega.Expect(alloc.GetID(udncontroller.MACVRFVIDKey("cudn-b"))).To(gomega.Equal(-1), "newer CUDN loses conflict, gets no pre-seeded VID")
@@ -2242,7 +2242,7 @@ var _ = ginkgo.Describe("initVIDAllocator", func() {
 		nad := testing.GenerateNAD("non-evpn", "non-evpn", "test-ns", ovntypes.Layer3Topology, "10.0.0.0/24", ovntypes.NetworkRolePrimary)
 		clientSet := util.GetOVNClientset(nad)
 
-		alloc, err := initVIDAllocator(mustListNADs(clientSet.NetworkAttchDefClient), nil)
+		alloc, err := initVIDAllocator(mustListNADs(clientSet.NetworkAttchDefClient), nil, nil)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		gomega.Expect(alloc.GetID(udncontroller.MACVRFVIDKey("non-evpn"))).To(gomega.Equal(-1))
 	})
