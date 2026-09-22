@@ -70,20 +70,22 @@ const (
 
 	// MaxEVPNVIDs is the maximum number of VIDs available for EVPN networks (0-4094, but 0 and 1 are reserved).
 	MaxEVPNVIDs = 4095
-	// reservedVIDZeroKey is the key used to reserve VID 0 (reserved per IEEE 802.1Q for priority tagging).
-	reservedVIDZeroKey = "__vid_zero_reserved__"
-	// reservedVIDOneKey is the key used to reserve VID 1 (default VLAN on many switches, avoided by convention).
-	reservedVIDOneKey = "__vid_one_reserved__"
+	// ReservedVIDZeroKey is the key used to reserve VID 0 (reserved per IEEE 802.1Q for priority tagging).
+	ReservedVIDZeroKey = "__vid_zero_reserved__"
+	// ReservedVIDOneKey is the key used to reserve VID 1 (default VLAN on many switches, avoided by convention).
+	ReservedVIDOneKey = "__vid_one_reserved__"
 )
 
-// macVRFKey returns the VID allocator key for a network's MAC-VRF.
-func macVRFKey(networkName string) string {
-	return networkName + "/macvrf"
+// MACVRFVIDKey returns the VID allocator key for a network's MAC-VRF.
+// The key space uses the object name (CUDN name) not the generated network name.
+func MACVRFVIDKey(objectName string) string {
+	return objectName + "/macvrf"
 }
 
-// ipVRFKey returns the VID allocator key for a network's IP-VRF.
-func ipVRFKey(networkName string) string {
-	return networkName + "/ipvrf"
+// IPVRFVIDKey returns the VID allocator key for a network's IP-VRF.
+// The key space uses the object name (CUDN name) not the generated network name.
+func IPVRFVIDKey(objectName string) string {
+	return objectName + "/ipvrf"
 }
 
 // vniKey identifies a VNI within a VTEP scope. VNIs must be unique per VTEP.
@@ -196,13 +198,11 @@ func New(
 	namespaceInformer corev1informer.NamespaceInformer,
 	vtepInformer vtepinformer.VTEPInformer,
 	raInformer rainformer.RouteAdvertisementsInformer,
+	vidAllocator id.Allocator,
 	eventRecorder record.EventRecorder,
 ) *Controller {
 	udnLister := udnInformer.Lister()
 	cudnLister := cudnInformer.Lister()
-
-	// Allocates VIDs in range 1-4094 (0 is reserved per IEEE 802.1Q).
-	vidAllocator := id.NewIDAllocator("EVPN-VIDs", MaxEVPNVIDs)
 
 	c := &Controller{
 		nadClient:         nadClient,
@@ -290,16 +290,6 @@ func (c *Controller) Run() error {
 
 // initializeController performs all startup initialization before controllers begin processing.
 func (c *Controller) initializeController() error {
-	// Reserve VID 0 and VID 1 to ensure they're never allocated to any network.
-	// VID 0 is reserved per IEEE 802.1Q standard.
-	// VID 1 is the default VLAN on many switches and avoided by convention.
-	if err := c.vidAllocator.ReserveID(reservedVIDZeroKey, 0); err != nil {
-		return fmt.Errorf("failed to reserve VID 0: %w", err)
-	}
-	if err := c.vidAllocator.ReserveID(reservedVIDOneKey, 1); err != nil {
-		return fmt.Errorf("failed to reserve VID 1: %w", err)
-	}
-
 	cudnNADs, err := c.buildCUDNToNADs()
 	if err != nil {
 		return err
@@ -420,17 +410,16 @@ func (c *Controller) recoverEVPNIDs(cudnNADs cudnToNADs) {
 
 	for _, entry := range evpnCUDNs {
 		if err := c.recoverEVPNIDsForCUDN(entry.cudn.Name); err != nil {
-			klog.Errorf("VID recovery failed for EVPN CUDN %s: %v. "+
-				"The CUDN will be reconciled and existing NAD VIDs will be preserved if possible.",
+			klog.Errorf("VNI recovery failed for EVPN CUDN %s: %v. "+
+				"The CUDN will be reconciled.",
 				entry.cudn.Name, err)
 			c.cudnController.Reconcile(entry.cudn.Name)
 		}
 	}
 }
 
-// recoverEVPNIDsForCUDN attempts to recover VIDs and VNI reservations for a single CUDN using NetworkManager's cache.
-// Returns nil if VIDs were successfully recovered or if no VIDs are allocated yet.
-// Returns error if VID reservation fails (e.g., conflict with another network).
+// recoverEVPNIDsForCUDN recovers VNI reservations for a single CUDN using NetworkManager's cache.
+// VIDs are pre-seeded by InitVIDAllocator before controllers start; only VNIs need recovery here.
 func (c *Controller) recoverEVPNIDsForCUDN(cudnName string) error {
 	networkName := util.GenerateCUDNNetworkName(cudnName)
 
@@ -447,48 +436,7 @@ func (c *Controller) recoverEVPNIDsForCUDN(cudnName string) error {
 		return fmt.Errorf("failed to reserve VNIs for cudn %s: %w", cudnName, err)
 	}
 
-	macVRFVID := netInfo.EVPNMACVRFVID()
-	ipVRFVID := netInfo.EVPNIPVRFVID()
-	// Check if this network has EVPN VIDs allocated
-	if macVRFVID == 0 && ipVRFVID == 0 {
-		klog.V(4).Infof("EVPN CUDN %s has no VIDs allocated yet, skipping recovery", cudnName)
-		return nil // No VIDs to recover
-	}
-
-	if err := c.reserveRecoveredVIDs(cudnName, macVRFVID, ipVRFVID); err != nil {
-		return fmt.Errorf("failed to reserve VIDs for cudn %s: %w", cudnName, err)
-	}
-
-	klog.V(4).Infof("Recovered VIDs for CUDN %s (macVRF=%d, ipVRF=%d)", cudnName, macVRFVID, ipVRFVID)
 	return nil
-}
-
-// reserveRecoveredVIDs reserves the given VIDs in the allocator for a network.
-// VIDs of 0 are skipped (not allocated).
-//
-// Both VIDs are attempted even if one fails - this maximizes recovery and protects
-// as many VIDs as possible. We don't release successfully reserved VIDs on partial
-// failure because they represent state that already exists in NADs; releasing them
-// could allow another network to "steal" the VID, causing route leakage.
-func (c *Controller) reserveRecoveredVIDs(networkName string, macVRFVID, ipVRFVID int) error {
-	var errs []error
-
-	if macVRFVID > 0 {
-		if err := c.vidAllocator.ReserveID(macVRFKey(networkName), macVRFVID); err != nil {
-			errs = append(errs, fmt.Errorf("failed to reserve VID %d for MAC-VRF of network %s: %w", macVRFVID, networkName, err))
-		} else {
-			klog.V(4).Infof("Recovered VID %d for MAC-VRF of network %s", macVRFVID, networkName)
-		}
-	}
-	if ipVRFVID > 0 {
-		if err := c.vidAllocator.ReserveID(ipVRFKey(networkName), ipVRFVID); err != nil {
-			errs = append(errs, fmt.Errorf("failed to reserve VID %d for IP-VRF of network %s: %w", ipVRFVID, networkName, err))
-		} else {
-			klog.V(4).Infof("Recovered VID %d for IP-VRF of network %s", ipVRFVID, networkName)
-		}
-	}
-
-	return errors.Join(errs...)
 }
 
 // releaseEVPNIDsForNetwork releases the VIDs and VNI reservations for a network's VRFs.
@@ -502,8 +450,8 @@ func (c *Controller) reserveRecoveredVIDs(networkName string, macVRFVID, ipVRFVI
 // and refuse to configure a VID already in use by a different network, waiting
 // until the old network is cleaned up.
 func (c *Controller) releaseEVPNIDsForNetwork(networkName string) {
-	macVID := c.vidAllocator.ReleaseID(macVRFKey(networkName))
-	ipVID := c.vidAllocator.ReleaseID(ipVRFKey(networkName))
+	macVID := c.vidAllocator.ReleaseID(MACVRFVIDKey(networkName))
+	ipVID := c.vidAllocator.ReleaseID(IPVRFVIDKey(networkName))
 	if macVID >= 0 || ipVID >= 0 {
 		klog.V(4).Infof("Released VIDs for network %s: MAC-VRF=%d, IP-VRF=%d", networkName, macVID, ipVID)
 	}

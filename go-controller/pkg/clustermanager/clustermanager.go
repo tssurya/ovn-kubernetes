@@ -5,10 +5,14 @@ package clustermanager
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 
-	networkattchmentdefclientset "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/client/clientset/versioned"
+	"slices"
+	"strings"
+
+	nettypes "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/apis/k8s.cni.cncf.io/v1"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	clientset "k8s.io/client-go/kubernetes"
@@ -31,6 +35,7 @@ import (
 	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/config"
 	nodecontroller "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/controllers/node"
 	networkconnectclientset "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/clusternetworkconnect/v1/apis/clientset/versioned"
+	udnv1 "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/userdefinednetwork/v1"
 	rainformer "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/routeadvertisements/v1/apis/informers/externalversions/routeadvertisements/v1"
 	vtepinformer "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/vtep/v1/apis/informers/externalversions/vtep/v1"
 	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/factory"
@@ -102,15 +107,32 @@ func NewClusterManager(
 	var (
 		err                 error
 		tunnelKeysAllocator *id.TunnelKeysAllocator
+		vidAllocator        id.Allocator
 	)
 	if config.OVNKubernetesFeature.EnableMultiNetwork {
+		// List NADs once from kubernetes API server; both tunnel-key and VID allocators need it.
+		existingNADs, err := ovnClient.NetworkAttchDefClient.K8sCniCncfIoV1().NetworkAttachmentDefinitions("").List(context.TODO(), metav1.ListOptions{})
+		if err != nil {
+			return nil, fmt.Errorf("failed to list NADs for allocator pre-seeding: %w", err)
+		}
+
 		// tunnelKeysAllocator is now only used for NAD tunnel keys allocation, but will be reused
 		// for Connecting UDNs. So we initialize it here and pass it to the networkManager.
 		// The same instance should be initialized only once and passed to all the
 		// users of tunnel-keys.
-		tunnelKeysAllocator, err = initTunnelKeysAllocator(ovnClient.NetworkAttchDefClient, ovnClient.NetworkConnectClient)
+		tunnelKeysAllocator, err = initTunnelKeysAllocator(existingNADs.Items, ovnClient.NetworkConnectClient)
 		if err != nil {
 			return nil, fmt.Errorf("failed to initialize tunnel keys allocator: %w", err)
+		}
+		if util.IsEVPNEnabled() {
+			existingCUDNs, err := ovnClient.UserDefinedNetworkClient.K8sV1().ClusterUserDefinedNetworks().List(context.TODO(), metav1.ListOptions{})
+			if err != nil {
+				return nil, fmt.Errorf("failed to list CUDNs for VID allocator pre-seeding: %w", err)
+			}
+			vidAllocator, err = initVIDAllocator(existingNADs.Items, existingCUDNs.Items)
+			if err != nil {
+				return nil, fmt.Errorf("failed to initialize VID allocator: %w", err)
+			}
 		}
 
 		cm.networkManager, err = networkmanager.NewForCluster(cm, wf, ovnClient, recorder, tunnelKeysAllocator)
@@ -201,6 +223,7 @@ func NewClusterManager(
 			wf.NamespaceInformer(),
 			vtepInformer,
 			raInformer,
+			vidAllocator,
 			cm.recorder,
 		)
 		cm.userDefinedNetworkController = udnController
@@ -408,18 +431,87 @@ func (cm *ClusterManager) Reconcile(name string, old, new util.NetInfo) error {
 	return nil
 }
 
+// initVIDAllocator creates and pre-seeds the cluster-wide VID allocator from existing NADs.
+// Must be called before any controller starts to prevent VID re-allocation on restart.
+// Key format matches udncontroller.MACVRFVIDKey / IPVRFVIDKey (object name, not network name).
+func initVIDAllocator(existingNADs []nettypes.NetworkAttachmentDefinition, existingCUDNs []udnv1.ClusterUserDefinedNetwork) (id.Allocator, error) {
+	// Allocates VIDs in range 1-4094 (0 is reserved per IEEE 802.1Q).
+	vidAllocator := id.NewIDAllocator("EVPN-VIDs", udncontroller.MaxEVPNVIDs)
+	if err := vidAllocator.ReserveID(udncontroller.ReservedVIDZeroKey, 0); err != nil {
+		return nil, fmt.Errorf("failed to reserve VID 0: %w", err)
+	}
+	if err := vidAllocator.ReserveID(udncontroller.ReservedVIDOneKey, 1); err != nil {
+		return nil, fmt.Errorf("failed to reserve VID 1: %w", err)
+	}
+
+	// Build a map from CUDN name → creation timestamp for deterministic conflict resolution.
+	// NAD names match their owner CUDN names (set by the UDN controller).
+	cudnTimestamp := make(map[string]metav1.Time, len(existingCUDNs))
+	for _, cudn := range existingCUDNs {
+		cudnTimestamp[cudn.Name] = cudn.CreationTimestamp
+	}
+
+	// Sort NADs by owner CUDN creation timestamp (oldest first): when two NADs claim the same
+	// VID the older CUDN wins, preserving user intent. Name is tie-breaker for stability.
+	slices.SortFunc(existingNADs, func(a, b nettypes.NetworkAttachmentDefinition) int {
+		ta, tb := cudnTimestamp[a.Name], cudnTimestamp[b.Name]
+		if ta.Before(&tb) {
+			return -1
+		}
+		if tb.Before(&ta) {
+			return 1
+		}
+		return strings.Compare(a.Name, b.Name)
+	})
+
+	for _, nad := range existingNADs {
+		netConf, err := util.ParseNetConf(&nad)
+		if err != nil {
+			if err.Error() == util.ErrorAttachDefNotOvnManaged.Error() {
+				continue
+			}
+			klog.Warningf("VID pre-seed: failed to parse NAD %s/%s: %v", nad.Namespace, nad.Name, err)
+			continue
+		}
+		if netConf.EVPN == nil {
+			continue
+		}
+		// Key uses nad.Name (= UDN/CUDN object name), matching the allocator key space
+		// used by the UDN controller during alloc/release (obj.GetName()).
+		// Both VRFs are attempted independently — a conflict on one does not skip the other.
+		var errs []error
+		if netConf.EVPN.MACVRF != nil && netConf.EVPN.MACVRF.VID > 0 {
+			if err := vidAllocator.ReserveID(udncontroller.MACVRFVIDKey(nad.Name), netConf.EVPN.MACVRF.VID); err != nil {
+				errs = append(errs, fmt.Errorf("MAC-VRF VID %d: %w", netConf.EVPN.MACVRF.VID, err))
+			} else {
+				klog.V(4).Infof("VID pre-seed: recovered MAC-VRF VID %d for NAD %s/%s",
+					netConf.EVPN.MACVRF.VID, nad.Namespace, nad.Name)
+			}
+		}
+		if netConf.EVPN.IPVRF != nil && netConf.EVPN.IPVRF.VID > 0 {
+			if err := vidAllocator.ReserveID(udncontroller.IPVRFVIDKey(nad.Name), netConf.EVPN.IPVRF.VID); err != nil {
+				errs = append(errs, fmt.Errorf("IP-VRF VID %d: %w", netConf.EVPN.IPVRF.VID, err))
+			} else {
+				klog.V(4).Infof("VID pre-seed: recovered IP-VRF VID %d for NAD %s/%s",
+					netConf.EVPN.IPVRF.VID, nad.Namespace, nad.Name)
+			}
+		}
+		if len(errs) > 0 {
+			klog.Errorf("VID pre-seed: NAD %s/%s conflicts: %v (NAD will be reconciled)",
+				nad.Namespace, nad.Name, errors.Join(errs...))
+		}
+	}
+	return vidAllocator, nil
+}
+
 // initTunnelKeysAllocator reserves any existing tunnel keys to avoid re-allocation.
 // It will be shared across multiple controllers and should account for different object types.
 // Good news is that we don't care about missing events, because we only need to reserve ids that are already
 // annotated, and no one else can annotate them except ClusterManager.
-func initTunnelKeysAllocator(nadClient networkattchmentdefclientset.Interface, cncClient networkconnectclientset.Interface) (*id.TunnelKeysAllocator, error) {
+func initTunnelKeysAllocator(existingNADs []nettypes.NetworkAttachmentDefinition, cncClient networkconnectclientset.Interface) (*id.TunnelKeysAllocator, error) {
 	tunnelKeysAllocator := id.NewTunnelKeyAllocator("TunnelKeys")
 
-	existingNADs, err := nadClient.K8sCniCncfIoV1().NetworkAttachmentDefinitions("").List(context.TODO(), metav1.ListOptions{})
-	if err != nil {
-		return nil, fmt.Errorf("failed to list existing NADs: %w", err)
-	}
-	for _, nad := range existingNADs.Items {
+	for _, nad := range existingNADs {
 		// reserve tunnel keys that are already allocated to make sure they are
 		if nad.Annotations[types.OvnNetworkTunnelKeysAnnotation] != "" {
 			netconf, err := util.ParseNetConf(&nad)

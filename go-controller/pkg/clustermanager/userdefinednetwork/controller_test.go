@@ -94,7 +94,7 @@ var _ = Describe("User Defined Network Controller", func() {
 		}
 		return New(cs.NetworkAttchDefClient, f.NADInformer(),
 			cs.UserDefinedNetworkClient, f.UserDefinedNetworkInformer(), f.ClusterUserDefinedNetworkInformer(),
-			renderNADStub, networkManager.Interface(), f.PodCoreInformer(), f.NamespaceInformer(), vtepInformer, f.RouteAdvertisementsInformer(), nil,
+			renderNADStub, networkManager.Interface(), f.PodCoreInformer(), f.NamespaceInformer(), vtepInformer, f.RouteAdvertisementsInformer(), newTestVIDAllocator(), nil,
 		)
 	}
 
@@ -117,7 +117,7 @@ var _ = Describe("User Defined Network Controller", func() {
 		}
 		return New(cs.NetworkAttchDefClient, f.NADInformer(),
 			cs.UserDefinedNetworkClient, f.UserDefinedNetworkInformer(), f.ClusterUserDefinedNetworkInformer(),
-			renderNADStub, nm.Interface(), f.PodCoreInformer(), f.NamespaceInformer(), vtepInformer, f.RouteAdvertisementsInformer(), nil,
+			renderNADStub, nm.Interface(), f.PodCoreInformer(), f.NamespaceInformer(), vtepInformer, f.RouteAdvertisementsInformer(), newTestVIDAllocator(), nil,
 		)
 	}
 
@@ -1069,78 +1069,6 @@ var _ = Describe("User Defined Network Controller", func() {
 				}).Should(Succeed())
 			})
 
-			It("should continue startup and preserve MAC-VRF VID when only IP-VRF VID recovery encounters a conflict", func() {
-				// When IP-VRF VID conflicts but MAC-VRF VID is available:
-				// - MAC-VRF recovery succeeds (VID reserved in allocator)
-				// - IP-VRF recovery fails (conflict)
-				// - CUDN is enqueued for reconciliation
-				// - MAC-VRF VID is preserved (already in allocator), IP-VRF gets new VID
-				testNs := testNamespace("evpn-ipvrf-conflict-test")
-				vtep := testVTEP("vtep-test")
-				cudn := testSymmetricIRBClusterUDN("evpn-ipvrf-conflict", vtep.Name, testNs.Name)
-
-				// Create a symmetric IRB NAD with both MAC-VRF (VID 3) and IP-VRF (VID 7)
-				existingNAD := testEVPNClusterUdnNADOwnedByCUDN(cudn, testNs.Name, &ovncnitypes.EVPNConfig{
-					VTEP:   vtep.Name,
-					MACVRF: &ovncnitypes.VRFConfig{VNI: 100, VID: 3},
-					IPVRF:  &ovncnitypes.VRFConfig{VNI: 200, VID: 7},
-				})
-
-				c = newTestControllerWithNetworkManager(template.RenderNetAttachDefManifest, cudn, testNs, vtep, existingNAD)
-
-				// Pre-reserve VID 7 for IP-VRF of a DIFFERENT network to create a conflict
-				Expect(c.vidAllocator.ReserveID("other-network/ipvrf", 7)).To(Succeed())
-
-				// Controller should start successfully
-				Expect(c.Run()).To(Succeed())
-
-				// MAC-VRF VID 3 was successfully reserved during recovery.
-				// IP-VRF VID 7 conflicted, so during reconciliation it gets new VID 2 (first available).
-				Eventually(func(g Gomega) {
-					nad, err := cs.NetworkAttchDefClient.K8sCniCncfIoV1().NetworkAttachmentDefinitions(testNs.Name).Get(context.Background(), cudn.Name, metav1.GetOptions{})
-					g.Expect(err).NotTo(HaveOccurred())
-					macVID, ipVID := evpnVIDsFromNAD(nad)
-					g.Expect(macVID).To(Equal(3), "MAC-VRF VID should be preserved (recovery succeeded)")
-					g.Expect(ipVID).To(Equal(2), "IP-VRF gets new VID (first available, 0,1 reserved, 7 is taken)")
-				}).Should(Succeed())
-			})
-
-			It("should continue startup and preserve IP-VRF VID when only MAC-VRF VID recovery encounters a conflict", func() {
-				// When MAC-VRF VID conflicts but IP-VRF VID is available:
-				// - MAC-VRF recovery fails (conflict)
-				// - IP-VRF recovery succeeds (VID reserved in allocator)
-				// - CUDN is enqueued for reconciliation
-				// - MAC-VRF gets new VID, IP-VRF VID is preserved
-				testNs := testNamespace("evpn-macvrf-conflict-test")
-				vtep := testVTEP("vtep-test")
-				cudn := testSymmetricIRBClusterUDN("evpn-macvrf-conflict", vtep.Name, testNs.Name)
-
-				// Create a symmetric IRB NAD with both MAC-VRF (VID 3) and IP-VRF (VID 7)
-				existingNAD := testEVPNClusterUdnNADOwnedByCUDN(cudn, testNs.Name, &ovncnitypes.EVPNConfig{
-					VTEP:   vtep.Name,
-					MACVRF: &ovncnitypes.VRFConfig{VNI: 100, VID: 3},
-					IPVRF:  &ovncnitypes.VRFConfig{VNI: 200, VID: 7},
-				})
-
-				c = newTestControllerWithNetworkManager(template.RenderNetAttachDefManifest, cudn, testNs, vtep, existingNAD)
-
-				// Pre-reserve VID 3 for a DIFFERENT network to create a conflict during recovery
-				Expect(c.vidAllocator.ReserveID("other-network/macvrf", 3)).To(Succeed())
-
-				// Controller should start successfully
-				Expect(c.Run()).To(Succeed())
-
-				// IP-VRF VID 7 was successfully reserved during recovery.
-				// MAC-VRF VID 3 conflicted, so during reconciliation it gets new VID 2 (first available).
-				Eventually(func(g Gomega) {
-					nad, err := cs.NetworkAttchDefClient.K8sCniCncfIoV1().NetworkAttachmentDefinitions(testNs.Name).Get(context.Background(), cudn.Name, metav1.GetOptions{})
-					g.Expect(err).NotTo(HaveOccurred())
-					macVID, ipVID := evpnVIDsFromNAD(nad)
-					g.Expect(macVID).To(Equal(2), "MAC-VRF gets new VID (first available, 0,1 reserved, 3 is already taken)")
-					g.Expect(ipVID).To(Equal(7), "IP-VRF VID should be preserved (recovery succeeded)")
-				}).Should(Succeed())
-			})
-
 			It("should not fail startup when CUDN exists but has no NADs yet", func() {
 				vtep := testVTEP("vtep-test")
 				// Create a CUDN without any NADs (namespace doesn't match selector)
@@ -1152,66 +1080,6 @@ var _ = Describe("User Defined Network Controller", func() {
 
 				// No VID should be allocated since there are no NADs
 				Expect(c.vidAllocator.GetID("evpn-no-nads/macvrf")).To(Equal(-1), "No VID should be allocated for CUDN without NADs")
-			})
-
-			It("should recover VIDs from NetworkManager cache at startup", func() {
-				// This tests the production startup recovery path where:
-				// 1. NetworkManager is started and processes existing NADs
-				// 2. UDN controller starts and recovers VIDs from NetworkManager's cache
-				testNs := testNamespace("evpn-nm-recovery-test")
-				vtep := testVTEP("vtep-test")
-				cudn := testEVPNClusterUDN("evpn-nm-recovery", &udnv1.EVPNConfig{VTEP: vtep.Name, MACVRF: &apitypes.VRFConfig{VNI: 100}}, testNs.Name)
-
-				// Create an existing NAD with VID 42 (simulating a previous controller run)
-				existingNAD := testEVPNClusterUdnNADOwnedByCUDN(cudn, testNs.Name, &ovncnitypes.EVPNConfig{VTEP: vtep.Name, MACVRF: &ovncnitypes.VRFConfig{VNI: 100, VID: 42}})
-
-				c = newTestControllerWithNetworkManager(template.RenderNetAttachDefManifest, cudn, testNs, vtep, existingNAD)
-				Expect(c.Run()).To(Succeed())
-
-				// VID should be recovered from NetworkManager cache at startup
-				Eventually(func() int {
-					return c.vidAllocator.GetID("evpn-nm-recovery/macvrf")
-				}).Should(Equal(42), "VID 42 should be recovered from NetworkManager cache at startup")
-			})
-
-			It("should recover VIDs in deterministic order based on CUDN creation timestamp", func() {
-				// When two CUDNs have NADs claiming the same VID, the older CUDN wins.
-				// This ensures deterministic behavior across restarts.
-				testNs1 := testNamespace("evpn-order-test-1")
-				testNs2 := testNamespace("evpn-order-test-2")
-				vtep := testVTEP("vtep-test")
-
-				// Create two CUDNs with different creation timestamps and unique UIDs
-				olderCUDN := testEVPNClusterUDN("aaa-older-cudn", &udnv1.EVPNConfig{VTEP: vtep.Name, MACVRF: &apitypes.VRFConfig{VNI: 100}}, testNs1.Name)
-				olderCUDN.UID = "older-uid-1"
-				olderCUDN.CreationTimestamp = metav1.NewTime(time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC))
-
-				newerCUDN := testEVPNClusterUDN("zzz-newer-cudn", &udnv1.EVPNConfig{VTEP: vtep.Name, MACVRF: &apitypes.VRFConfig{VNI: 300}}, testNs2.Name)
-				newerCUDN.UID = "newer-uid-2"
-				newerCUDN.CreationTimestamp = metav1.NewTime(time.Date(2024, 6, 1, 0, 0, 0, 0, time.UTC))
-
-				// Both NADs claim VID 42 - this simulates a conflict scenario
-				olderNAD := testEVPNClusterUdnNADOwnedByCUDN(olderCUDN, testNs1.Name, &ovncnitypes.EVPNConfig{VTEP: vtep.Name, MACVRF: &ovncnitypes.VRFConfig{VNI: 100, VID: 42}})
-				newerNAD := testEVPNClusterUdnNADOwnedByCUDN(newerCUDN, testNs2.Name, &ovncnitypes.EVPNConfig{VTEP: vtep.Name, MACVRF: &ovncnitypes.VRFConfig{VNI: 300, VID: 42}})
-
-				c = newTestControllerWithNetworkManager(template.RenderNetAttachDefManifest,
-					olderCUDN, newerCUDN, testNs1, testNs2, vtep, olderNAD, newerNAD)
-				Expect(c.Run()).To(Succeed())
-
-				// The older CUDN should win the VID 42, regardless of alphabetical name order
-				// (newerCUDN has name "zzz-newer-cudn" which comes after "aaa-older-cudn" alphabetically,
-				// but olderCUDN should still win because it was created first)
-				Eventually(func() int {
-					return c.vidAllocator.GetID("aaa-older-cudn/macvrf")
-				}).Should(Equal(42), "Older CUDN should keep VID 42")
-
-				// The newer CUDN loses the conflict and gets a new VID during reconciliation
-				Eventually(func(g Gomega) {
-					nad, err := cs.NetworkAttchDefClient.K8sCniCncfIoV1().NetworkAttachmentDefinitions(testNs2.Name).Get(context.Background(), newerCUDN.Name, metav1.GetOptions{})
-					g.Expect(err).NotTo(HaveOccurred())
-					macVID, _ := evpnVIDsFromNAD(nad)
-					g.Expect(macVID).To(Equal(2), "Newer CUDN should get new VID (first available) since older CUDN won VID 42")
-				}).Should(Succeed())
 			})
 
 			It("should return error when VID pool is exhausted", func() {
@@ -1285,20 +1153,6 @@ var _ = Describe("User Defined Network Controller", func() {
 					macVID, _ := evpnVIDsFromNAD(nad)
 					g.Expect(macVID).To(Equal(MaxEVPNVIDs-1), "should get the last available VID")
 				}).Should(Succeed())
-			})
-
-			It("should fail to start if VID 0 is already reserved by another resource", func() {
-				// This tests the defensive check that VID 0 (reserved per IEEE 802.1Q)
-				// must be reservable during controller initialization.
-				c = newTestControllerWithNetworkManager(template.RenderNetAttachDefManifest)
-
-				// Reserve VID 0 with a DIFFERENT key (simulating corruption/bug)
-				Expect(c.vidAllocator.ReserveID("some-other-key", 0)).To(Succeed())
-
-				// Run should fail because initializeController can't reserve VID 0
-				err := c.Run()
-				Expect(err).To(HaveOccurred())
-				Expect(err.Error()).To(ContainSubstring("failed to reserve VID 0"))
 			})
 
 			It("should allocate new VID when namespace and NAD are created at runtime", func() {
@@ -3171,6 +3025,20 @@ func testNADWithDeletionTimestamp(ts time.Time) *netv1.NetworkAttachmentDefiniti
 	nad := testNAD()
 	nad.DeletionTimestamp = &metav1.Time{Time: ts}
 	return nad
+}
+
+// newTestVIDAllocator creates a VID allocator with VID 0 and 1 pre-reserved, matching
+// production state after initVIDAllocator in clustermanager runs.
+// NAD-level pre-seeding (restart recovery) is tested in clustermanager_test.go.
+func newTestVIDAllocator() id.Allocator {
+	a := id.NewIDAllocator("EVPN-VIDs", MaxEVPNVIDs)
+	if err := a.ReserveID(ReservedVIDZeroKey, 0); err != nil {
+		panic(fmt.Sprintf("newTestVIDAllocator: reserve VID 0: %v", err))
+	}
+	if err := a.ReserveID(ReservedVIDOneKey, 1); err != nil {
+		panic(fmt.Sprintf("newTestVIDAllocator: reserve VID 1: %v", err))
+	}
+	return a
 }
 
 func testNamespace(name string) *corev1.Namespace {

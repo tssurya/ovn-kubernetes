@@ -219,7 +219,7 @@ func (c *Controller) allocateEVPNIDsIfNeeded(obj client.Object) ([]template.Rend
 	var macVRFVID, ipVRFVID int
 	// Allocate VID for MAC-VRF if present
 	if evpnCfg.MACVRF != nil {
-		vid, err := c.vidAllocator.AllocateID(macVRFKey(networkName))
+		vid, err := c.vidAllocator.AllocateID(MACVRFVIDKey(networkName))
 		if err != nil {
 			return nil, fmt.Errorf("failed to allocate VID for MAC-VRF: %w", err)
 		}
@@ -229,7 +229,7 @@ func (c *Controller) allocateEVPNIDsIfNeeded(obj client.Object) ([]template.Rend
 
 	// Allocate VID for IP-VRF if present
 	if evpnCfg.IPVRF != nil {
-		vid, err := c.vidAllocator.AllocateID(ipVRFKey(networkName))
+		vid, err := c.vidAllocator.AllocateID(IPVRFVIDKey(networkName))
 		if err != nil {
 			return nil, fmt.Errorf("failed to allocate VID for IP-VRF: %w", err)
 		}
