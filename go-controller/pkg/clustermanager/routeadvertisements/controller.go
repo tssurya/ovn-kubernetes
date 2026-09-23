@@ -38,6 +38,8 @@ import (
 	controllerutil "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/controller"
 	eiptypes "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/egressip/v1"
 	egressiplisters "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/egressip/v1/apis/listers/egressip/v1"
+	networkconnectv1 "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/clusternetworkconnect/v1"
+	networkconnectlisters "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/clusternetworkconnect/v1/apis/listers/clusternetworkconnect/v1"
 	ratypes "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/routeadvertisements/v1"
 	raapply "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/routeadvertisements/v1/apis/applyconfiguration/routeadvertisements/v1"
 	raclientset "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/routeadvertisements/v1/apis/clientset/versioned"
@@ -75,6 +77,7 @@ var (
 type Controller struct {
 	wf *factory.WatchFactory
 
+	cncLister         networkconnectlisters.ClusterNetworkConnectLister
 	eipLister         egressiplisters.EgressIPLister
 	frrLister         frrlisters.FRRConfigurationLister
 	nadLister         nadlisters.NetworkAttachmentDefinitionLister
@@ -88,6 +91,7 @@ type Controller struct {
 	nadClient nadclientset.Interface
 	raClient  raclientset.Interface
 
+	cncController         controllerutil.Controller
 	eipController         controllerutil.Controller
 	frrController         controllerutil.Controller
 	nadController         controllerutil.Controller
@@ -268,6 +272,20 @@ func NewController(
 		c.vtepLister = wf.VTEPInformer().Lister()
 	}
 
+	if util.IsNetworkConnectEnabled() {
+		c.cncLister = wf.ClusterNetworkConnectInformer().Lister()
+
+		cncControllerCfg := &controllerutil.ControllerConfig[networkconnectv1.ClusterNetworkConnect]{
+			RateLimiter:    workqueue.DefaultTypedControllerRateLimiter[string](),
+			Reconcile:      func(_ string) error { c.raController.ReconcileAll(); return nil },
+			Threadiness:    1,
+			Informer:       wf.ClusterNetworkConnectInformer().Informer(),
+			Lister:         c.cncLister.List,
+			ObjNeedsUpdate: cncNeedsUpdate,
+		}
+		c.cncController = controllerutil.NewController("clustermanager routeadvertisements cnc controller", cncControllerCfg)
+	}
+
 	return c
 }
 
@@ -292,6 +310,9 @@ func (c *Controller) Start() error {
 		c.nodeController,
 		c.raController,
 	}
+	if util.IsNetworkConnectEnabled() {
+		controllers = append(controllers, c.cncController)
+	}
 	if util.IsUplinkEnabled() {
 		controllers = append(controllers, c.uplinkStateController)
 	}
@@ -308,6 +329,9 @@ func (c *Controller) Stop() {
 		c.nadController,
 		c.nodeController,
 		c.raController,
+	}
+	if util.IsNetworkConnectEnabled() {
+		controllers = append(controllers, c.cncController)
 	}
 	if util.IsUplinkEnabled() {
 		controllers = append(controllers, c.uplinkStateController)
@@ -460,6 +484,9 @@ type selectedNetworks struct {
 	networkTransport map[string]string
 	// networkUplinks is a map of selected network to its Uplink name.
 	networkUplinks map[string]string
+	// cncParentVRFConfigs is an ordered list of EVPN CNC parent VRF configurations
+	// for CNCs whose selected networks are all included in this RA's selected network set.
+	cncParentVRFConfigs []*cncParentVRFConfig
 }
 
 // vrfConfig holds base VRF EVPN configuration for a network
@@ -760,6 +787,15 @@ func (c *Controller) generateFRRConfigurations(ra *ratypes.RouteAdvertisements) 
 		selectedNetworks.vtepIPsByNode[node] = sets.List(ips)
 	}
 	selectedNetworks.vtepCIDRs = sets.List(vtepCIDRSet)
+
+	// Populate CNC parent VRF configs for EVPN CNCs whose child networks are
+	// all selected by this RA.  Only relevant when both EVPN and network-connect
+	// features are enabled.
+	if c.cncLister != nil && hasEVPNConfig {
+		if err := c.populateCNCParentVRFConfigs(selectedNetworks, networkSet); err != nil {
+			return nil, nil, err
+		}
+	}
 
 	// helper to gather host subnets and cache during reconcile
 	// TODO perhaps cache across reconciles as well
@@ -1372,6 +1408,20 @@ func (c *Controller) generateFRRConfiguration(
 		}
 	}
 
+	// For MAC-VRF-only CNC children: add a structured Router.Imports entry so
+	// FRR imports routes from the CNC parent VRF into the child VRF.  IP-VRF
+	// children are handled via raw config in generateRawConfig instead.
+	for _, cncCfg := range selectedNetworks.cncParentVRFConfigs {
+		for _, childVRF := range cncCfg.MACVRFOnlyChildVRFNames {
+			idx := slices.IndexFunc(routers, func(r frrtypes.Router) bool { return r.VRF == childVRF })
+			if idx >= 0 {
+				routers[idx].Imports = append(routers[idx].Imports, frrtypes.Import{VRF: cncCfg.ParentVRFName})
+			}
+			// If no router for this child VRF, the network is not active on
+			// this node — skip; it will be added once the node becomes active.
+		}
+	}
+
 	// Generate raw config, if any.
 	// TODO: once frr-k8s provides a typed API for this config, we can use that instead of raw config
 	rawConfig := generateRawConfig(selectedNetworks, vrfNeighbors, vrfASNs)
@@ -1758,6 +1808,135 @@ func (c *Controller) updateRAStatus(ra *ratypes.RouteAdvertisements, hadUpdates 
 	return nil
 }
 
+// populateCNCParentVRFConfigs finds EVPN CNCs whose entire set of selected
+// networks is covered by this RA's networkSet, and for each such CNC builds a
+// cncParentVRFConfig describing the parent VRF and its children. Called only
+// when both EVPN and network-connect features are enabled.
+func (c *Controller) populateCNCParentVRFConfigs(selected *selectedNetworks, networkSet sets.Set[string]) error {
+	cncs, err := c.cncLister.List(labels.Everything())
+	if err != nil {
+		return fmt.Errorf("failed to list ClusterNetworkConnects: %w", err)
+	}
+
+	for _, cnc := range cncs {
+		if cnc.Spec.EVPNConfiguration == nil {
+			continue
+		}
+		// Only generate FRR config once the VID has been allocated, which
+		// confirms the CNC controller has accepted and provisioned the CNC.
+		vid, err := util.ParseNetworkConnectEVPNParentVRFVIDAnnotation(cnc)
+		if err != nil || vid == 0 {
+			continue
+		}
+
+		// Resolve the CNC's child NADs using the same helper the RA uses for
+		// its own network selectors. If any selector type is unsupported (e.g.
+		// PrimaryUserDefinedNetworks, which is not yet wired for EVPN), skip
+		// this CNC with a debug log.
+		cncNADs, err := c.getSelectedNADs(cnc.Spec.NetworkSelectors)
+		if err != nil {
+			klog.V(4).Infof("RA: skipping CNC %q for FRR config: failed to resolve network selectors: %v", cnc.Name, err)
+			continue
+		}
+
+		// Collect the network names the CNC connects.
+		cncNetworks := sets.New[string]()
+		for _, nad := range cncNADs {
+			if name := util.GetAnnotatedNetworkName(nad); name != "" {
+				cncNetworks.Insert(name)
+			}
+		}
+		if cncNetworks.Len() == 0 {
+			continue
+		}
+
+		// Determine which of the CNC's child networks this RA covers.
+		// Multi-RA support: a CNC's child networks may be spread across
+		// multiple RAs. Each RA generates a partial parent VRF stanza that
+		// only imports the children it covers. frr-k8s raw config is plain
+		// string concatenation (sorted by Priority); FRR (≥10.2.2, the
+		// minimum version targeted by ovn-kubernetes) processes duplicate
+		// "router bgp vrf" blocks additively, so the union of all partial
+		// stanzas produces the correct final config once every covering RA
+		// has reconciled.
+		//
+		// Transient window: between the first and last covering RA
+		// reconciling, the parent VRF has only partial "import vrf" entries.
+		// During this window, traffic between child networks whose imports
+		// have not yet appeared is black-holed. This is best-effort and
+		// self-correcting: once all RAs reconcile the config is complete.
+		//
+		// Best practice: use a single RA that selects all CNC child networks
+		// to eliminate the transient window entirely.
+		//
+		// TODO: surface partial-coverage state as a condition on the CNC status.
+		coveredNetworks := cncNetworks.Intersection(networkSet)
+		if coveredNetworks.Len() == 0 {
+			// This RA shares no networks with this CNC — not relevant.
+			continue
+		}
+		if coveredNetworks.Len() < cncNetworks.Len() {
+			klog.V(4).Infof("CNC %q: %d of %d child networks covered by this RA; "+
+				"remaining networks will be handled by their respective RA",
+				cnc.Name, coveredNetworks.Len(), cncNetworks.Len())
+		}
+
+		parentVRFName := util.GetCNCParentVRFName(cnc.Name)
+		parentVNI := cnc.Spec.EVPNConfiguration.IPVRF.VNI
+
+		var childVRFNames []string
+		var ipVRFChildren []*cncIPVRFChild
+		var macVRFOnlyChildVRFNames []string
+
+		for _, networkName := range sets.List(coveredNetworks) {
+			network := c.nm.GetNetwork(networkName)
+			if network == nil {
+				continue
+			}
+			vrfName := util.GetNetworkVRFName(network)
+			childVRFNames = append(childVRFNames, vrfName)
+
+			hasIPVRF := network.EVPNIPVRFVNI() > 0
+			hasMACVRFOnly := network.EVPNMACVRFVNI() > 0 && !hasIPVRF
+
+			if hasIPVRF {
+				var subnets []*net.IPNet
+				for _, entry := range network.Subnets() {
+					subnets = append(subnets, entry.CIDR)
+				}
+				ipVRFChildren = append(ipVRFChildren, &cncIPVRFChild{
+					VRFName: vrfName,
+					Subnets: subnets,
+				})
+			} else if hasMACVRFOnly {
+				macVRFOnlyChildVRFNames = append(macVRFOnlyChildVRFNames, vrfName)
+			}
+		}
+
+		// Sort for deterministic FRR config generation.
+		slices.Sort(childVRFNames)
+		slices.Sort(macVRFOnlyChildVRFNames)
+		slices.SortFunc(ipVRFChildren, func(a, b *cncIPVRFChild) int {
+			return strings.Compare(a.VRFName, b.VRFName)
+		})
+
+		selected.cncParentVRFConfigs = append(selected.cncParentVRFConfigs, &cncParentVRFConfig{
+			ParentVRFName:           parentVRFName,
+			ParentVNI:               parentVNI,
+			ChildVRFNames:           childVRFNames,
+			IPVRFChildren:           ipVRFChildren,
+			MACVRFOnlyChildVRFNames: macVRFOnlyChildVRFNames,
+		})
+	}
+
+	// Sort for deterministic config across reconciles.
+	slices.SortFunc(selected.cncParentVRFConfigs, func(a, b *cncParentVRFConfig) int {
+		return strings.Compare(a.ParentVRFName, b.ParentVRFName)
+	})
+
+	return nil
+}
+
 func (c *Controller) getSelectedNADs(networkSelectors apitypes.NetworkSelectors) ([]*nadtypes.NetworkAttachmentDefinition, error) {
 	var selected []*nadtypes.NetworkAttachmentDefinition
 	for _, networkSelector := range networkSelectors {
@@ -1869,6 +2048,17 @@ func isOwnUpdate(managedFields []metav1.ManagedFieldsEntry) bool {
 
 func raNeedsUpdate(oldObj, newObj *ratypes.RouteAdvertisements) bool {
 	return oldObj == nil || newObj == nil || oldObj.Generation != newObj.Generation
+}
+
+func cncNeedsUpdate(oldObj, newObj *networkconnectv1.ClusterNetworkConnect) bool {
+	if oldObj == nil || newObj == nil {
+		return true
+	}
+	// Spec changes (network selectors, EVPN config) bump Generation.
+	// The VID annotation is written by the CNC controller after allocation —
+	// watch it so RA reconciles once the CNC is fully provisioned.
+	return oldObj.Generation != newObj.Generation ||
+		oldObj.Annotations[util.OvnCNCEVPNParentVRFVIDAnnotation] != newObj.Annotations[util.OvnCNCEVPNParentVRFVIDAnnotation]
 }
 
 func frrConfigurationNeedsUpdate(oldObj, newObj *frrtypes.FRRConfiguration) bool {

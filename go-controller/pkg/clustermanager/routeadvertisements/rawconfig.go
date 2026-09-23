@@ -13,6 +13,37 @@ import (
 	utilnet "k8s.io/utils/net"
 )
 
+// cncIPVRFChild holds generation data for one IP-VRF child of an EVPN CNC parent VRF.
+type cncIPVRFChild struct {
+	// VRFName is the Linux VRF name of the child (from GetNetworkVRFName, ≤15 chars).
+	VRFName string
+	// Subnets are the child network's pod subnets, used by the route-map in
+	// genCNCIPVRFChildImportSection to prevent re-advertisement of routes
+	// imported from the parent VRF back into EVPN.
+	Subnets []*net.IPNet
+}
+
+// cncParentVRFConfig holds the FRR generation data for one EVPN CNC parent VRF.
+// The parent VRF acts as a routing hub: it owns a single L3 VNI and imports
+// routes from all connected child VRFs so they can exchange traffic via EVPN.
+type cncParentVRFConfig struct {
+	// ParentVRFName is the Linux interface name (≤15 chars, from GetCNCParentVRFName).
+	ParentVRFName string
+	// ParentVNI is the L3 VNI assigned to the parent VRF.
+	ParentVNI int32
+	// ChildVRFNames is the ordered list of child VRF names covered by this RA,
+	// used in the parent "router bgp" "import vrf" stanzas. When multiple RAs
+	// each cover a subset of the CNC's children, each RA emits only its own
+	// subset here; FRR applies the partial stanzas additively.
+	ChildVRFNames []string
+	// IPVRFChildren are IP-VRF children that require raw FRR config to prevent
+	// re-advertisement of routes received from the parent VRF back into EVPN.
+	IPVRFChildren []*cncIPVRFChild
+	// MACVRFOnlyChildVRFNames are MAC-VRF-only children (no IP-VRF) that get a
+	// structured frr-k8s Router.Imports entry instead of raw config.
+	MACVRFOnlyChildVRFNames []string
+}
+
 // generateRawConfig generates raw FRR configuration. Main purpose is to
 // generates EVPN config sections based on the provided selected networks
 // IP-VRFs and MAC-VRFs. Also adds allowas-in origin to all neighbors, which is
@@ -80,6 +111,18 @@ func generateRawConfig(selected *selectedNetworks, vrfNeighbors map[string][]str
 		// neighbors sorted for deterministic config generation
 		neighbors := slices.Sorted(slices.Values(vrfNeighbors[vrf]))
 		buf.WriteString(genNonDefaultVRFSection(vrf, vrfASNs[vrf], neighbors, ipVRFConfigMap[vrf]))
+	}
+
+	// CNC parent VRF sections: one parent VRF per EVPN CNC connecting EVPN-type
+	// CUDNs selected by this RA. The parent VRF owns the L3 VNI and imports
+	// routes from all child VRFs. IP-VRF children additionally need a raw
+	// route-map stanza to prevent re-advertisement of imported routes.
+	globalASN := vrfASNs[""]
+	for _, cncCfg := range selected.cncParentVRFConfigs {
+		buf.WriteString(genCNCParentVRFSection(cncCfg.ParentVRFName, globalASN, cncCfg.ParentVNI, cncCfg.ChildVRFNames))
+		for _, child := range cncCfg.IPVRFChildren {
+			buf.WriteString(genCNCIPVRFChildImportSection(child.VRFName, cncCfg.ParentVRFName, globalASN, child.Subnets))
+		}
 	}
 
 	return buf.String()
