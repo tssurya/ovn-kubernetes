@@ -4,6 +4,8 @@
 package util
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -2160,6 +2162,24 @@ func ParseNetworkIDFromVRFName(vrf string) int {
 		return types.InvalidID
 	}
 	return id
+}
+
+// GetCNCParentVRFName returns the Linux VRF interface name for a CNC's parent VRF.
+// Uses the same naming convention as getEVPNVTEPDeviceName in the node evpn package:
+//   - If the name fits in 15 chars:  "cnc-<cncName>"  (human-readable, "-" separator)
+//   - Otherwise:                     "cnc.<sha256[:8]>"  (hash fallback, "." separator)
+//
+// The "." separator is not valid in Kubernetes names so the two forms cannot collide.
+// This function is deterministic — CM and node side compute the same VRF name from
+// the CNC name alone without needing any allocated IDs.
+func GetCNCParentVRFName(cncName string) string {
+	const prefix = "cnc"
+	candidate := prefix + "-" + cncName
+	if len(candidate) <= types.MaxInterfaceNameLength {
+		return candidate
+	}
+	h := sha256.Sum256([]byte(cncName))
+	return prefix + "." + hex.EncodeToString(h[:])[:8]
 }
 
 // GetNetworkRole returns the role of this controller's

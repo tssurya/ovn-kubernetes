@@ -6,6 +6,7 @@ package routeadvertisements
 import (
 	"fmt"
 	"maps"
+	"net"
 	"slices"
 	"strings"
 
@@ -271,6 +272,129 @@ func genNonDefaultVRFEVPNSection(cfg *ipVRFConfig) string {
 	}
 
 	buf.WriteString(" exit-address-family\n")
+
+	return buf.String()
+}
+
+// genCNCParentVRFSection generates the FRR stanza for an EVPN CNC parent VRF.
+// The parent VRF is the L3 routing hub that imports routes from all child VRFs
+// and re-advertises them via EVPN Type-5 routes.
+//
+// Generated config structure:
+//
+//	vrf <parentVRFName>
+//	 vni <l3VNI>
+//	exit-vrf
+//	!
+//	router bgp <asn> vrf <parentVRFName>
+//	 address-family ipv4 unicast
+//	  import vrf <child1>           <- one per child, sorted
+//	  import vrf <child2>
+//	 exit-address-family
+//	 address-family l2vpn evpn
+//	  advertise ipv4 unicast
+//	  advertise ipv6 unicast
+//	 exit-address-family
+//	exit
+//	!
+func genCNCParentVRFSection(parentVRFName string, asn uint32, l3VNI int32, childVRFNames []string) string {
+	if asn == 0 || l3VNI == 0 {
+		return ""
+	}
+
+	var buf strings.Builder
+
+	// VRF-to-VNI mapping for the parent VRF.
+	fmt.Fprintf(&buf, "vrf %s\n vni %d\nexit-vrf\n!\n", parentVRFName, l3VNI)
+
+	fmt.Fprintf(&buf, "router bgp %d vrf %s\n", asn, parentVRFName)
+
+	// ipv4 unicast section: import vrf directives for each child VRF.
+	// Sorted for deterministic config generation.
+	sorted := slices.Sorted(slices.Values(childVRFNames))
+	if len(sorted) > 0 {
+		buf.WriteString(" address-family ipv4 unicast\n")
+		for _, child := range sorted {
+			fmt.Fprintf(&buf, "  import vrf %s\n", child)
+		}
+		buf.WriteString(" exit-address-family\n")
+	}
+
+	// l2vpn evpn section: re-advertise imported routes as EVPN Type-5.
+	buf.WriteString(" address-family l2vpn evpn\n")
+	buf.WriteString("  advertise ipv4 unicast\n")
+	buf.WriteString("  advertise ipv6 unicast\n")
+	buf.WriteString(" exit-address-family\n")
+
+	buf.WriteString("exit\n!\n")
+
+	return buf.String()
+}
+
+// genCNCIPVRFChildImportSection generates the raw FRR stanza needed for an IP-VRF
+// child connected to a CNC parent VRF. It adds a route-map on "advertise ipv4 unicast"
+// to prevent routes imported from the parent VRF from being re-advertised under the
+// child's own route-target — there is no structured FRRConfiguration equivalent for this.
+//
+// MAC-VRF-only children only need `import vrf <parent>` which is expressible via the
+// structured Router.Imports API in FRRConfiguration and should be handled there instead.
+//
+//	ip prefix-list CNC-<CHILD>-PREFIXES seq 10 permit <subnet1>
+//	ip prefix-list CNC-<CHILD>-PREFIXES seq 20 permit <subnet2>
+//	!
+//	route-map CNC-<CHILD>-ADVERTISE permit 10
+//	 match ip address prefix-list CNC-<CHILD>-PREFIXES
+//	!
+//	router bgp <asn> vrf <childVRFName>
+//	 address-family ipv4 unicast
+//	  import vrf <parentVRFName>
+//	 exit-address-family
+//	 address-family l2vpn evpn
+//	  advertise ipv4 unicast route-map CNC-<CHILD>-ADVERTISE
+//	 exit-address-family
+//	exit
+//	!
+func genCNCIPVRFChildImportSection(childVRFName, parentVRFName string, asn uint32, childSubnets []*net.IPNet) string {
+	if asn == 0 {
+		return ""
+	}
+
+	// childVRFName comes from GetNetworkVRFName which guarantees ≤15 chars,
+	// so "CNC-" + upper(childVRFName) + "-PREFIXES/ADVERTISE" fits within FRR's 63-char limit.
+	base := strings.ToUpper(childVRFName)
+	prefixList := "CNC-" + base + "-PREFIXES"
+	routeMap := "CNC-" + base + "-ADVERTISE"
+
+	var buf strings.Builder
+
+	if len(childSubnets) > 0 {
+		// Emit prefix-list and route-map to filter re-advertisement of imported routes.
+		// Subnets sorted for deterministic output.
+		sorted := make([]*net.IPNet, len(childSubnets))
+		copy(sorted, childSubnets)
+		slices.SortFunc(sorted, func(a, b *net.IPNet) int {
+			return strings.Compare(a.String(), b.String())
+		})
+		for i, subnet := range sorted {
+			fmt.Fprintf(&buf, "ip prefix-list %s seq %d permit %s\n", prefixList, (i+1)*10, subnet)
+		}
+		buf.WriteString("!\n")
+		fmt.Fprintf(&buf, "route-map %s permit 10\n", routeMap)
+		fmt.Fprintf(&buf, " match ip address prefix-list %s\n", prefixList)
+		buf.WriteString("!\n")
+	}
+
+	fmt.Fprintf(&buf, "router bgp %d vrf %s\n", asn, childVRFName)
+
+	buf.WriteString(" address-family ipv4 unicast\n")
+	fmt.Fprintf(&buf, "  import vrf %s\n", parentVRFName)
+	buf.WriteString(" exit-address-family\n")
+
+	buf.WriteString(" address-family l2vpn evpn\n")
+	fmt.Fprintf(&buf, "  advertise ipv4 unicast route-map %s\n", routeMap)
+	buf.WriteString(" exit-address-family\n")
+
+	buf.WriteString("exit\n!\n")
 
 	return buf.String()
 }

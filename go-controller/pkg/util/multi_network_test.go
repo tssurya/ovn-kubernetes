@@ -2958,3 +2958,26 @@ func TestGetUDNVRFName(t *testing.T) {
 	g.Expect(GetUDNVRFName(ovntypes.InvalidID)).To(gomega.BeEmpty(),
 		"the name can't be derived while the network ID is unknown")
 }
+
+func TestGetCNCParentVRFName(t *testing.T) {
+	g := gomega.NewWithT(t)
+
+	// Short name: fits within 15 chars → human-readable "cnc-<name>"
+	g.Expect(GetCNCParentVRFName("tenant")).To(gomega.Equal("cnc-tenant"))
+	g.Expect(GetCNCParentVRFName("ab")).To(gomega.Equal("cnc-ab"))
+	// Exactly 15 chars: "cnc-" (4) + 11 chars = 15
+	g.Expect(GetCNCParentVRFName("12345678901")).To(gomega.Equal("cnc-12345678901"))
+
+	// Too long → hash fallback "cnc.<sha256[:8]>", always 12 chars
+	long := "my-very-long-cnc-name-that-exceeds-limit"
+	result := GetCNCParentVRFName(long)
+	g.Expect(result).To(gomega.HavePrefix("cnc."))
+	g.Expect(result).To(gomega.HaveLen(12))
+
+	// Deterministic: same input → same output
+	g.Expect(GetCNCParentVRFName(long)).To(gomega.Equal(result))
+
+	// Two different long names produce different hashes (probabilistic but effectively guaranteed)
+	other := "another-very-long-cnc-name-that-exceeds-limit"
+	g.Expect(GetCNCParentVRFName(other)).NotTo(gomega.Equal(result))
+}
