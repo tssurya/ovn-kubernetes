@@ -28,8 +28,15 @@ import (
 
 	libovsdbclient "github.com/ovn-kubernetes/libovsdb/client"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	nadlisters "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/client/listers/k8s.cni.cncf.io/v1"
+
 	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/config"
 	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/controller"
+	networkconnectv1 "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/clusternetworkconnect/v1"
+	networkconnectlisters "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/clusternetworkconnect/v1/apis/listers/clusternetworkconnect/v1"
+	apitypes "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/types"
+	userdefinednetworkv1 "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/userdefinednetwork/v1"
 	vtepv1 "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/vtep/v1"
 	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/factory"
 	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/kube"
@@ -49,6 +56,8 @@ type nodeAddressManager interface {
 	AddOnAddressesChangedHandler(handler func())
 }
 
+var cudnGVK = userdefinednetworkv1.SchemeGroupVersion.WithKind("ClusterUserDefinedNetwork")
+
 const (
 	ovsBridgeInt = "br-int"
 
@@ -66,6 +75,12 @@ const (
 	// vtepAnnotationFieldManager identifies this controller as the owner of
 	// the VTEP annotation on the node, used to detect external modifications.
 	vtepAnnotationFieldManager = "node-vtep-controller"
+
+	// cncParentVRFTableBase is the Linux routing table ID base for CNC parent VRFs.
+	// CNC parent VRF table IDs = cncParentVRFTableBase + VID (VID is 1-4094, table IDs 1000001-1004094).
+	// This range is safely above regular CUDN VRF tables (RoutingTableIDStart + ifIndex, practically ≤ ~66000)
+	// and DPU VRF tables (100000 + networkID, practically ≤ ~110000).
+	cncParentVRFTableBase = 1000000
 )
 
 type Controller struct {
@@ -109,6 +124,25 @@ type Controller struct {
 	podNeighLock  sync.Mutex
 	podNeighbors  map[string]*neighEntries
 
+	// cncLister, nadLister, and cncController are set when NetworkConnect is enabled.
+	// cncController triggers VTEP reconciliation when CNC VID annotation or spec changes.
+	// nadLister is used to resolve CNC ClusterUserDefinedNetworks selectors to EVPN networks
+	// without needing a VTEP annotation on the CNC object.
+	// Note: PrimaryUserDefinedNetworks selectors are not handled here because namespace-scoped
+	// UDNs do not support EVPN transport.
+	cncLister     networkconnectlisters.ClusterNetworkConnectLister
+	nadLister     nadlisters.NetworkAttachmentDefinitionLister
+	cncController controller.Controller
+
+	// cncVRFsByBridgeLock guards cncVRFsByBridge and cncVRFDevicesByBridge.
+	cncVRFsByBridgeLock sync.Mutex
+	// cncVRFsByBridge tracks CNC parent VRF SVI names per bridge for stale cleanup.
+	cncVRFsByBridge map[string]sets.Set[string]
+	// cncVRFDevicesByBridge tracks CNC parent VRF Linux device names per VTEP bridge.
+	// The VRF device is global (not bridge-bound), but is managed alongside the bridge's SVI
+	// for consistent lifecycle: when the bridge (VTEP) is deleted all its CNC VRF devices are too.
+	cncVRFDevicesByBridge map[string]sets.Set[string]
+
 	stopChan chan struct{}
 }
 
@@ -118,16 +152,18 @@ func NewController(nodeName string, wf factory.NodeWatchFactory, kube kube.Inter
 	}
 
 	c := &Controller{
-		nodeName:       nodeName,
-		watchFactory:   wf,
-		kube:           kube,
-		networkMgr:     networkMgr,
-		ndm:            ndm,
-		ovsClient:      ovsClient,
-		addressManager: addressManager,
-		nadVTEPInfo:    make(map[string]string),
-		svisByBridge:   make(map[string]sets.Set[string]),
-		stopChan:       make(chan struct{}),
+		nodeName:              nodeName,
+		watchFactory:          wf,
+		kube:                  kube,
+		networkMgr:            networkMgr,
+		ndm:                   ndm,
+		ovsClient:             ovsClient,
+		addressManager:        addressManager,
+		nadVTEPInfo:           make(map[string]string),
+		svisByBridge:          make(map[string]sets.Set[string]),
+		cncVRFsByBridge:       make(map[string]sets.Set[string]),
+		cncVRFDevicesByBridge: make(map[string]sets.Set[string]),
+		stopChan:              make(chan struct{}),
 	}
 
 	vtepInformer := wf.VTEPInformer()
@@ -168,6 +204,20 @@ func NewController(nodeName string, wf factory.NodeWatchFactory, kube kube.Inter
 		return nil, fmt.Errorf("failed to add node event handler: %w", err)
 	}
 
+	if util.IsNetworkConnectEnabled() {
+		cncInformer := wf.ClusterNetworkConnectInformer()
+		c.cncLister = cncInformer.Lister()
+		c.nadLister = wf.NADInformer().Lister()
+		c.cncController = controller.NewController("evpn-node-cnc-controller", &controller.ControllerConfig[networkconnectv1.ClusterNetworkConnect]{
+			RateLimiter:    workqueue.DefaultTypedControllerRateLimiter[string](),
+			Reconcile:      func(_ string) error { c.vtepController.ReconcileAll(); return nil },
+			ObjNeedsUpdate: cncNodeNeedsUpdate,
+			Threadiness:    1,
+			Informer:       cncInformer.Informer(),
+			Lister:         c.cncLister.List,
+		})
+	}
+
 	addressManager.AddOnAddressesChangedHandler(func() {
 		c.vtepController.Reconcile(reconcileNodeAddressChange)
 	})
@@ -185,7 +235,11 @@ func (c *Controller) Start() (err error) {
 			c.nadReconcilerID = 0
 		}
 	}()
-	return controller.StartWithInitialSync(c.initialSync, c.vtepController, c.nadReconciler, c.podController)
+	controllers := []controller.Reconciler{c.vtepController, c.nadReconciler, c.podController}
+	if c.cncController != nil {
+		controllers = append(controllers, c.cncController)
+	}
+	return controller.StartWithInitialSync(c.initialSync, controllers...)
 }
 
 func (c *Controller) initialSync() error {
@@ -249,7 +303,11 @@ func (c *Controller) Stop() {
 		c.networkMgr.DeRegisterNADReconciler(c.nadReconcilerID)
 	}
 
-	controller.Stop(c.vtepController, c.nadReconciler, c.podController)
+	controllers := []controller.Reconciler{c.vtepController, c.nadReconciler, c.podController}
+	if c.cncController != nil {
+		controllers = append(controllers, c.cncController)
+	}
+	controller.Stop(controllers...)
 
 	close(c.stopChan)
 }
@@ -412,7 +470,12 @@ func (c *Controller) ensureDevices(vtep *vtepv1.VTEP, vtepIPv4, vtepIPv6 net.IP)
 		return nil, fmt.Errorf("failed to collect VTEP %s EVPN networks: %w", vtep.Name, err)
 	}
 
-	mappings := c.getVIDVNIMappings(networks)
+	cncConfigs, err := c.collectCNCParentVRFConfigs(vtep.Name)
+	if err != nil {
+		return nil, fmt.Errorf("failed to collect VTEP %s CNC parent VRF configs: %w", vtep.Name, err)
+	}
+
+	mappings := c.getVIDVNIMappings(networks, cncConfigs)
 	if vtepIPv4 != nil {
 		vxlan4Name := GetEVPNVXLANName(vtep.Name, utilnet.IPv4)
 		if err := c.ensureVXLAN(vxlan4Name, bridgeName, vtepIPv4, mappings); err != nil {
@@ -439,6 +502,10 @@ func (c *Controller) ensureDevices(vtep *vtepv1.VTEP, vtepIPv4, vtepIPv6 net.IP)
 
 	if err := c.reconcileSVIs(bridgeName, networks); err != nil {
 		return nil, fmt.Errorf("failed to reconcile VTEP %s SVIs: %w", vtep.Name, err)
+	}
+
+	if err := c.reconcileCNCParentVRFs(bridgeName, cncConfigs); err != nil {
+		return nil, fmt.Errorf("failed to reconcile VTEP %s CNC parent VRFs: %w", vtep.Name, err)
 	}
 
 	return networks, nil
@@ -486,6 +553,159 @@ type evpnNetworkInfo struct {
 	vrfName              string
 }
 
+// cncParentVRFInfo holds the desired Linux device state for a CNC parent VRF.
+type cncParentVRFInfo struct {
+	vrfName string
+	sviName string
+	vid     int
+	vni     int
+	tableID uint32
+}
+
+// cncNodeNeedsUpdate returns true when a CNC change is relevant to the node EVPN controller.
+// Watches for spec changes (networkSelectors may change which VTEP is selected) and VID
+// allocation (the readiness signal that triggers SVI creation).
+func cncNodeNeedsUpdate(oldObj, newObj *networkconnectv1.ClusterNetworkConnect) bool {
+	if oldObj == nil || newObj == nil {
+		return true
+	}
+	return oldObj.Generation != newObj.Generation ||
+		oldObj.Annotations[util.OvnCNCEVPNParentVRFVIDAnnotation] != newObj.Annotations[util.OvnCNCEVPNParentVRFVIDAnnotation]
+}
+
+// collectCNCParentVRFConfigs returns the desired CNC parent VRF state for a given VTEP.
+// It resolves CNC networkSelectors locally using the NAD and namespace listers and the
+// node's networkManager — no annotation on the CNC object is needed to determine VTEP membership.
+// Returns nil when NetworkConnect is disabled (cncLister is not wired).
+func (c *Controller) collectCNCParentVRFConfigs(vtepName string) ([]*cncParentVRFInfo, error) {
+	if c.cncLister == nil {
+		return nil, nil
+	}
+	cncs, err := c.cncLister.List(labels.Everything())
+	if err != nil {
+		return nil, fmt.Errorf("failed to list CNCs: %w", err)
+	}
+
+	var configs []*cncParentVRFInfo
+	for _, cnc := range cncs {
+		if cnc.Spec.EVPNConfiguration == nil {
+			continue
+		}
+		vid, err := util.ParseNetworkConnectEVPNParentVRFVIDAnnotation(cnc)
+		if err != nil {
+			klog.Warningf("CNC %s: invalid VID annotation, skipping: %v", cnc.Name, err)
+			continue
+		}
+		if vid == 0 {
+			// VID not yet allocated by clustermanager; skip until ready.
+			continue
+		}
+
+		// Resolve the CNC's networkSelectors to EVPN networks. This mirrors the logic in
+		// the clustermanager's discoverSelectedNetworks, but uses the node's local listers.
+		usesVTEP, err := c.cncUsesVTEP(cnc, vtepName)
+		if err != nil {
+			klog.Warningf("CNC %s: error resolving networks for VTEP %s, skipping: %v", cnc.Name, vtepName, err)
+			continue
+		}
+		if !usesVTEP {
+			continue
+		}
+
+		configs = append(configs, &cncParentVRFInfo{
+			vrfName: util.GetCNCParentVRFName(cnc.Name),
+			sviName: GetEVPNCNCParentVRFSVIName(cnc.Name),
+			vid:     vid,
+			vni:     int(cnc.Spec.EVPNConfiguration.IPVRF.VNI),
+			tableID: uint32(cncParentVRFTableBase + vid),
+		})
+	}
+	return configs, nil
+}
+
+// cncUsesVTEP returns true if any network selected by the CNC uses the given VTEP.
+// It resolves the CNC's networkSelectors using the local NAD and namespace listers,
+// then checks EVPNVTEPName() against vtepName via the networkManager.
+func (c *Controller) cncUsesVTEP(cnc *networkconnectv1.ClusterNetworkConnect, vtepName string) (bool, error) {
+	for _, selector := range cnc.Spec.NetworkSelectors {
+		switch selector.NetworkSelectionType {
+		case apitypes.ClusterUserDefinedNetworks:
+			networkSelector, err := metav1.LabelSelectorAsSelector(&selector.ClusterUserDefinedNetworkSelector.NetworkSelector)
+			if err != nil {
+				return false, fmt.Errorf("failed to parse CUDN selector: %w", err)
+			}
+			nads, err := c.nadLister.List(networkSelector)
+			if err != nil {
+				return false, fmt.Errorf("failed to list NADs: %w", err)
+			}
+			for _, nad := range nads {
+				owner := metav1.GetControllerOfNoCopy(nad)
+				if owner == nil || owner.Kind != cudnGVK.Kind || owner.APIVersion != cudnGVK.GroupVersion().String() {
+					continue
+				}
+				network := c.networkMgr.GetNetInfoForNADKey(nad.Namespace + "/" + nad.Name)
+				if network != nil && network.EVPNVTEPName() == vtepName {
+					return true, nil
+				}
+			}
+		}
+	}
+	return false, nil
+}
+
+// reconcileCNCParentVRFs ensures the desired CNC parent VRF devices and SVIs exist
+// on the given bridge, and removes stale ones. The VRF device is created first;
+// the SVI is then mastered to it so FRR can perform EVPN import-vrf routing.
+func (c *Controller) reconcileCNCParentVRFs(bridgeName string, configs []*cncParentVRFInfo) error {
+	desiredSVIs := sets.New[string]()
+	desiredVRFs := sets.New[string]()
+	for _, cfg := range configs {
+		desiredVRFs.Insert(cfg.vrfName)
+		desiredSVIs.Insert(cfg.sviName)
+		if err := c.ndm.EnsureLink(netlinkdevicemanager.DeviceConfig{
+			Link: &netlink.Vrf{
+				LinkAttrs: netlink.LinkAttrs{Name: cfg.vrfName},
+				Table:     cfg.tableID,
+			},
+		}); err != nil {
+			return fmt.Errorf("failed to ensure CNC parent VRF device %s: %w", cfg.vrfName, err)
+		}
+		if err := c.ndm.EnsureLink(netlinkdevicemanager.DeviceConfig{
+			Link: &netlink.Vlan{
+				LinkAttrs: netlink.LinkAttrs{Name: cfg.sviName},
+				VlanId:    cfg.vid,
+			},
+			VLANParent: bridgeName,
+			Master:     cfg.vrfName,
+		}); err != nil {
+			return fmt.Errorf("failed to ensure CNC parent VRF SVI %s: %w", cfg.sviName, err)
+		}
+	}
+
+	c.cncVRFsByBridgeLock.Lock()
+	defer c.cncVRFsByBridgeLock.Unlock()
+
+	for sviName := range c.cncVRFsByBridge[bridgeName] {
+		if !desiredSVIs.Has(sviName) {
+			if err := c.ndm.DeleteLink(sviName); err != nil {
+				return fmt.Errorf("failed to delete stale CNC parent VRF SVI %s: %w", sviName, err)
+			}
+		}
+	}
+	c.cncVRFsByBridge[bridgeName] = desiredSVIs
+
+	for vrfName := range c.cncVRFDevicesByBridge[bridgeName] {
+		if !desiredVRFs.Has(vrfName) {
+			if err := c.ndm.DeleteLink(vrfName); err != nil {
+				return fmt.Errorf("failed to delete stale CNC parent VRF device %s: %w", vrfName, err)
+			}
+		}
+	}
+	c.cncVRFDevicesByBridge[bridgeName] = desiredVRFs
+
+	return nil
+}
+
 // collectEVPNNetworks gathers EVPN network info for all networks using this VTEP.
 // This is rebuilt on every reconcile to pick up network additions/removals without
 // maintaining a separate long-lived cache.
@@ -518,7 +738,7 @@ func (c *Controller) collectEVPNNetworks(vtepName string) ([]evpnNetworkInfo, er
 
 // getVIDVNIMappings builds the VID-VNI mapping table from the collected networks.
 // Returns a non-nil empty slice when no networks exist so NDM removes stale mappings.
-func (c *Controller) getVIDVNIMappings(networks []evpnNetworkInfo) []netlinkdevicemanager.VIDVNIMapping {
+func (c *Controller) getVIDVNIMappings(networks []evpnNetworkInfo, cncConfigs []*cncParentVRFInfo) []netlinkdevicemanager.VIDVNIMapping {
 	mappings := make([]netlinkdevicemanager.VIDVNIMapping, 0)
 	for _, n := range networks {
 		if n.macVRFVID != 0 && n.macVRFVNI != 0 {
@@ -526,6 +746,11 @@ func (c *Controller) getVIDVNIMappings(networks []evpnNetworkInfo) []netlinkdevi
 		}
 		if n.ipVRFVID != 0 && n.ipVRFVNI != 0 {
 			mappings = append(mappings, netlinkdevicemanager.VIDVNIMapping{VID: uint16(n.ipVRFVID), VNI: uint32(n.ipVRFVNI)})
+		}
+	}
+	for _, cfg := range cncConfigs {
+		if cfg.vid != 0 && cfg.vni != 0 {
+			mappings = append(mappings, netlinkdevicemanager.VIDVNIMapping{VID: uint16(cfg.vid), VNI: uint32(cfg.vni)})
 		}
 	}
 	return mappings
@@ -673,6 +898,22 @@ func (c *Controller) deleteVTEPDevices(vtepName string) error {
 		delete(c.svisByBridge, bridgeName)
 	}
 	c.svisByBridgeLock.Unlock()
+
+	// Clean up CNC parent VRF SVIs and VRF devices associated with this bridge.
+	c.cncVRFsByBridgeLock.Lock()
+	for sviName := range c.cncVRFsByBridge[bridgeName] {
+		if err := c.ndm.DeleteLink(sviName); err != nil {
+			errs = append(errs, fmt.Errorf("failed to delete VTEP %s CNC parent VRF SVI %s: %w", vtepName, sviName, err))
+		}
+	}
+	delete(c.cncVRFsByBridge, bridgeName)
+	for vrfName := range c.cncVRFDevicesByBridge[bridgeName] {
+		if err := c.ndm.DeleteLink(vrfName); err != nil {
+			errs = append(errs, fmt.Errorf("failed to delete VTEP %s CNC parent VRF device %s: %w", vtepName, vrfName, err))
+		}
+	}
+	delete(c.cncVRFDevicesByBridge, bridgeName)
+	c.cncVRFsByBridgeLock.Unlock()
 
 	if err := c.ndm.DeleteLink(GetEVPNVXLANName(vtepName, utilnet.IPv4)); err != nil {
 		errs = append(errs, fmt.Errorf("failed to delete VTEP %s IPv4 VXLAN device: %w", vtepName, err))

@@ -14,13 +14,14 @@ package evpn
 // Since "." is not valid in Kubernetes names and names cannot start with "-",
 // the two paths can never collide.
 //
-//   Prefix  Device          Name example  Fallback example
-//   evbr    EVPN bridge     evbr-myvtep   evbr.a3f2b1c9
-//   evx4    VXLAN IPv4      evx4-myvtep   evx4.a3f2b1c9
-//   evx6    VXLAN IPv6      evx6-myvtep   evx6.a3f2b1c9
-//   svl3    L3/IP-VRF SVI   svl3-blue     svl3.42
-//   svl2    L2/MAC-VRF SVI  svl2-blue     svl2.42
-//   ovl2    OVS L2 port     ovl2-blue     ovl2.42
+//   Prefix  Device               Name example  Fallback example
+//   evbr    EVPN bridge          evbr-myvtep   evbr.a3f2b1c9
+//   evx4    VXLAN IPv4           evx4-myvtep   evx4.a3f2b1c9
+//   evx6    VXLAN IPv6           evx6-myvtep   evx6.a3f2b1c9
+//   svl3    L3/IP-VRF SVI        svl3-blue     svl3.42
+//   svl2    L2/MAC-VRF SVI       svl2-blue     svl2.42
+//   ovl2    OVS L2 port          ovl2-blue     ovl2.42
+//   cvl3    CNC parent VRF SVI   cvl3-myc      cvl3.a3f2b1c9
 import (
 	"crypto/sha256"
 	"encoding/hex"
@@ -32,12 +33,13 @@ import (
 )
 
 const (
-	bridgePrefix  = "evbr"
-	vxlan4Prefix  = "evx4"
-	vxlan6Prefix  = "evx6"
-	l3SVIPrefix   = "svl3"
-	l2SVIPrefix   = "svl2"
-	ovsPortPrefix = "ovl2"
+	bridgePrefix          = "evbr"
+	vxlan4Prefix          = "evx4"
+	vxlan6Prefix          = "evx6"
+	l3SVIPrefix           = "svl3"
+	l2SVIPrefix           = "svl2"
+	ovsPortPrefix         = "ovl2"
+	cncParentVRFSVIPrefix = "cvl3"
 )
 
 // GetEVPNBridgeName returns the EVPN bridge name for a VTEP.
@@ -81,6 +83,13 @@ func GetEVPNL2SVIName(netInfo util.NetInfo) string {
 // GetEVPNOVSPortName returns the OVS port name for an EVPN network (e.g. ovl2-mynet or ovl2.42).
 func GetEVPNOVSPortName(netInfo util.NetInfo) string {
 	return getEVPNNetworkDeviceName(netInfo, ovsPortPrefix)
+}
+
+// GetEVPNCNCParentVRFSVIName returns the L3 SVI name for a CNC parent VRF
+// (e.g. cvl3-mync or cvl3.a3f2b1c9). The SVI is a VLAN interface on the EVPN
+// bridge and is mastered to the parent VRF Linux device.
+func GetEVPNCNCParentVRFSVIName(cncName string) string {
+	return getEVPNVTEPDeviceName(cncName, cncParentVRFSVIPrefix)
 }
 
 // getEVPNNetworkDeviceName generates device names with a given prefix.
