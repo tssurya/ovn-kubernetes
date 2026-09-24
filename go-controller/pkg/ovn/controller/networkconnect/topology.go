@@ -190,7 +190,104 @@ func (c *Controller) computeNodeInfo() ([]*corev1.Node, sets.Set[string], error)
 	return allNodes, currentNodeIDs, nil
 }
 
-// syncNetworkConnections syncs all network connections for a CNC.
+// finalizeConnectivitySync handles the transition-cleanup and state-flag bookkeeping that is
+// identical between Geneve and EVPN sync paths:
+//  1. Full LBG cleanup when ServiceNetwork transitions from enabled to disabled.
+//  2. Full partial-connectivity ACL cleanup when partial mode is leaving.
+//  3. Updates serviceNetworkConnectEnabled / podNetworkConnectEnabled flags on success.
+//
+// errs is the accumulated error slice from the per-network loop; any new errors are appended
+// before joining. The combined error is returned.
+func (c *Controller) finalizeConnectivitySync(
+	cncName string,
+	cncState *networkConnectState,
+	serviceDesired, podDesired bool,
+	partialWasEnabled, partialDesired bool,
+	errs []error,
+) error {
+	if !serviceDesired && cncState.serviceNetworkConnectEnabled {
+		klog.V(4).Infof("CNC %s: ServiceNetwork disabled, cleaning up cross-network LB attachments", cncName)
+		if err := c.cleanupServiceConnectivity(cncName); err != nil {
+			errs = append(errs, fmt.Errorf("CNC %s: failed to cleanup service connectivity: %w", cncName, err))
+		}
+	}
+
+	if partialWasEnabled && !partialDesired {
+		klog.V(4).Infof("CNC %s: partial connectivity disabled, cleaning up ACLs", cncName)
+		if err := c.cleanupPartialConnectivity(cncName); err != nil {
+			errs = append(errs, fmt.Errorf("CNC %s: failed to cleanup partial connectivity: %w", cncName, err))
+		}
+	}
+
+	if len(errs) == 0 {
+		cncState.serviceNetworkConnectEnabled = serviceDesired
+		cncState.podNetworkConnectEnabled = podDesired
+	}
+
+	return utilerrors.Join(errs...)
+}
+
+// buildStaleNetworkSharedDeleteOps appends LBG and partial-connectivity ACL delete ops for a
+// network that is no longer selected by the CNC. Both Geneve and EVPN stale-cleanup loops call
+// this; Geneve additionally deletes connect-router ports, routing policies, and static routes.
+func (c *Controller) buildStaleNetworkSharedDeleteOps(
+	ops []ovsdb.Operation,
+	cncName string,
+	networkID int,
+	serviceDesired, partialWasEnabled bool,
+) ([]ovsdb.Operation, error) {
+	var errs []error
+	var err error
+	if serviceDesired {
+		ops, err = c.cleanupLoadBalancerGroupOps(ops, cncName, networkID)
+		if err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if partialWasEnabled {
+		ops, err = c.cleanupPartialConnectivityACLsOps(ops, cncName, networkID)
+		if err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return ops, utilerrors.Join(errs...)
+}
+
+// prepareLBGAndACLState creates the CNC service LBG and prepares the partial connectivity ACL
+// state that both Geneve and EVPN sync loops need before iterating per-network operations.
+// ownerKeySet keys are owner strings; values may be nil (EVPN) or actual subnets (Geneve).
+// Returns early with an error if either setup step fails, since per-network ops depend on them.
+func (c *Controller) prepareLBGAndACLState(
+	cncName string,
+	ownerKeySet map[string][]*net.IPNet,
+	serviceDesired, partialDesired bool,
+) (*nbdb.LoadBalancerGroup, *partialConnectivityState, error) {
+	var partialConnState *partialConnectivityState
+	if partialDesired {
+		var err error
+		partialConnState, err = c.preparePartialConnectivityACLs(cncName, ownerKeySet)
+		if err != nil {
+			return nil, nil, fmt.Errorf("CNC %s: failed to prepare partial connectivity ACLs: %w", cncName, err)
+		}
+	}
+
+	var serviceLBG *nbdb.LoadBalancerGroup
+	if serviceDesired {
+		lbgName := getCNCServiceLBGroupName(cncName)
+		if err := libovsdbops.CreateOrUpdateLoadBalancerGroup(c.nbClient, &nbdb.LoadBalancerGroup{Name: lbgName}); err != nil {
+			return nil, nil, fmt.Errorf("CNC %s: failed to create/update LBG %s: %w", cncName, lbgName, err)
+		}
+		var err error
+		serviceLBG, err = c.findCNCServiceLBGroup(cncName)
+		if err != nil || serviceLBG == nil {
+			return nil, nil, fmt.Errorf("CNC %s: failed to find LBG %s after creation: %v", cncName, lbgName, err)
+		}
+	}
+
+	return serviceLBG, partialConnState, nil
+}
+
+// syncGeneveNetworkConnections syncs all network connections for a Geneve-transport CNC.
 // STEP2: Handle partial connectivity ACLs BEFORE creating network connections
 // This ensures drop rules are in place before connectivity is established (security)
 // STEP3: Create the patch ports connecting network router's to the connect router
@@ -201,7 +298,7 @@ func (c *Controller) computeNodeInfo() ([]*corev1.Node, sets.Set[string], error)
 // each of the connected networks.
 // STEP6: If ServiceNetwork connectivity is enabled, add load balancers of connected networks
 // to all other connected networks' switches.
-func (c *Controller) syncNetworkConnections(cnc *networkconnectv1.ClusterNetworkConnect, allocatedSubnets map[string][]*net.IPNet) error {
+func (c *Controller) syncGeneveNetworkConnections(cnc *networkconnectv1.ClusterNetworkConnect, allocatedSubnets map[string][]*net.IPNet) error {
 	cncName := cnc.Name
 	cncState, exists := c.cncCache[cncName]
 	if !exists || cncState == nil {
@@ -231,15 +328,9 @@ func (c *Controller) syncNetworkConnections(cnc *networkconnectv1.ClusterNetwork
 	partialConnectivityDesired := serviceConnectivityDesired && !podConnectivityDesired
 	var errs []error
 
-	// Prepare partial connectivity ACLs if needed (service connectivity without pod connectivity)
-	// If preparation fails, return early since per-network ACL ops require a valid state.
-	// It's a security risk if the ACLs are not prepared correctly.
-	var partialConnState *partialConnectivityState
-	if partialConnectivityDesired {
-		partialConnState, err = c.preparePartialConnectivityACLs(cncName, allocatedSubnets)
-		if err != nil {
-			return fmt.Errorf("CNC %s: failed to prepare partial connectivity ACLs: %w", cncName, err)
-		}
+	serviceLBG, partialConnState, err := c.prepareLBGAndACLState(cncName, allocatedSubnets, serviceConnectivityDesired, partialConnectivityDesired)
+	if err != nil {
+		return fmt.Errorf("CNC %s: failed to prepare LBG and ACL state: %w", cncName, err)
 	}
 
 	// Pre-build the advertised network isolation override ACL (if strict isolation is enabled).
@@ -247,21 +338,6 @@ func (c *Controller) syncNetworkConnections(cnc *networkconnectv1.ClusterNetwork
 	advertisedOverrideACL, err := c.prepareAdvertisedOverrideACL(cncName, allocatedSubnets)
 	if err != nil {
 		return fmt.Errorf("CNC %s: failed to prepare advertised override ACL: %w", cncName, err)
-	}
-
-	// Create/update the CNC's service LBG before the per-network loop (like partial connectivity ACLs).
-	// The LBG is created once (with UUID populated via lookup) and reused inside the loop for each network.
-	// If the LBG cannot be created, return early since per-network LBG ops require a valid LBG.
-	var serviceLBG *nbdb.LoadBalancerGroup
-	if serviceConnectivityDesired {
-		lbgName := getCNCServiceLBGroupName(cncName)
-		if err := libovsdbops.CreateOrUpdateLoadBalancerGroup(c.nbClient, &nbdb.LoadBalancerGroup{Name: lbgName}); err != nil {
-			return fmt.Errorf("CNC %s: failed to create/update LBG %s: %w", cncName, lbgName, err)
-		}
-		serviceLBG, err = c.findCNCServiceLBGroup(cncName)
-		if err != nil || serviceLBG == nil {
-			return fmt.Errorf("CNC %s: failed to find LBG %s after creation: %v", cncName, lbgName, err)
-		}
 	}
 
 	// Track which switches should have the advertised override ACL.
@@ -551,22 +627,11 @@ func (c *Controller) syncNetworkConnections(cnc *networkconnectv1.ClusterNetwork
 			continue
 		}
 
-		// If ServiceNetwork is enabled, cleanup LB attachments for this network.
-		// With LBG: remove the disconnected network's LBs from the CNC's LBG,
-		// and remove the LBG from the disconnected network's switch.
-		if serviceConnectivityDesired {
-			deleteOps, err = c.cleanupLoadBalancerGroupOps(deleteOps, cncName, networkID)
-			if err != nil {
-				errs = append(errs, fmt.Errorf("CNC %s: failed to cleanup service connectivity for network %s: %w", cncName, owner, err))
-			}
-		}
-
-		// Cleanup partial connectivity ACLs from this network's switch
-		if partialConnectivityWasEnabled {
-			deleteOps, err = c.cleanupPartialConnectivityACLsOps(deleteOps, cncName, networkID)
-			if err != nil {
-				errs = append(errs, fmt.Errorf("CNC %s: failed to cleanup partial connectivity ACLs for network %s: %w", cncName, owner, err))
-			}
+		// Cleanup LBG attachments and partial connectivity ACLs for this network.
+		var sharedErr error
+		deleteOps, sharedErr = c.buildStaleNetworkSharedDeleteOps(deleteOps, cncName, networkID, serviceConnectivityDesired, partialConnectivityWasEnabled)
+		if sharedErr != nil {
+			errs = append(errs, fmt.Errorf("CNC %s: failed to cleanup shared ops for network %s: %w", cncName, owner, sharedErr))
 		}
 
 		// Transact per network to keep transaction sizes bounded
@@ -582,31 +647,6 @@ func (c *Controller) syncNetworkConnections(cnc *networkconnectv1.ClusterNetwork
 		cncState.connectedNetworks.Delete(owner)
 	}
 
-	// If ServiceNetwork was enabled but now disabled, cleanup all cross-network LB attachments
-	if !serviceConnectivityDesired && cncState.serviceNetworkConnectEnabled {
-		klog.V(4).Infof("CNC %s: ServiceNetwork disabled, cleaning up cross-network LB attachments", cncName)
-		if err := c.cleanupServiceConnectivity(cncName); err != nil {
-			errs = append(errs, fmt.Errorf("CNC %s: failed to cleanup service connectivity: %w", cncName, err))
-		}
-	}
-
-	// Cleanup partial connectivity ACLs if transitioning away from partial connectivity mode.
-	// Partial = service enabled && pod disabled. Cleanup needed when:
-	// - Service was enabled && pod was disabled (partial was active)
-	// - AND now either service is disabled OR pod is enabled
-	if partialConnectivityWasEnabled && !partialConnectivityDesired {
-		klog.V(4).Infof("CNC %s: partial connectivity disabled, cleaning up ACLs", cncName)
-		if err := c.cleanupPartialConnectivity(cncName); err != nil {
-			errs = append(errs, fmt.Errorf("CNC %s: failed to cleanup partial connectivity: %w", cncName, err))
-		}
-		// Only destroy the shared address set if advertised override also doesn't need it
-		if advertisedOverrideACL == nil {
-			if err := c.destroyConnectedSubnetsAddressSet(cncName); err != nil {
-				errs = append(errs, fmt.Errorf("CNC %s: failed to destroy address set: %w", cncName, err))
-			}
-		}
-	}
-
 	// Remove the advertised override ACL from switches where the network is no longer advertised.
 	// This handles the case where a RouteAdvertisement is deleted/modified, causing a network
 	// to stop being advertised while still connected by the CNC.
@@ -614,18 +654,159 @@ func (c *Controller) syncNetworkConnections(cnc *networkconnectv1.ClusterNetwork
 		errs = append(errs, fmt.Errorf("CNC %s: failed to cleanup stale advertised override ACLs: %w", cncName, err))
 	}
 
-	// Only update state flags if no errors occurred, so that on the next reconcile
-	// the controller correctly detects transitions (e.g., partial connectivity was
-	// enabled but setup failed → retry setup instead of skipping to cleanup).
-	// NOTE: Since ops are idempotent, its OK even if the errors were partial
-	// say affects only service connectivity but not partial connectivity. It's not
-	// worth the overhead to track failures separately.
-	if len(errs) == 0 {
-		cncState.serviceNetworkConnectEnabled = serviceConnectivityDesired
-		cncState.podNetworkConnectEnabled = podConnectivityDesired
+	return c.finalizeConnectivitySync(cncName, cncState,
+		serviceConnectivityDesired, podConnectivityDesired,
+		partialConnectivityWasEnabled, partialConnectivityDesired,
+		errs)
+}
+
+// syncEVPNNetworkConnections reconciles OVN resources for an EVPN CNC.
+// Unlike Geneve CNCs, EVPN CNCs use VRF/VXLAN for pod traffic isolation and routing;
+// no connect-router, no connect ports, no routing policies, and no static routes are needed.
+// This function only manages the LBG (for ServiceNetwork) and isolation ACLs (for partial
+// connectivity = ServiceNetwork enabled without PodNetwork).
+//
+// discoveredNetworks: map[ownerKey]NetInfo resolved from CNC selectors.
+func (c *Controller) syncEVPNNetworkConnections(
+	cnc *networkconnectv1.ClusterNetworkConnect,
+	cncState *networkConnectState,
+	discoveredNetworks map[string]util.NetInfo,
+) error {
+	cncName := cnc.Name
+
+	desiredNetworks := sets.New[string]()
+	for ownerKey := range discoveredNetworks {
+		desiredNetworks.Insert(ownerKey)
+	}
+	networksToDelete := cncState.connectedNetworks.Difference(desiredNetworks)
+	networksToCreate := desiredNetworks.Difference(cncState.connectedNetworks)
+
+	klog.V(5).Infof("EVPN CNC %s: desired=%v connected=%v toCreate=%v toDelete=%v",
+		cncName, desiredNetworks.UnsortedList(), cncState.connectedNetworks.UnsortedList(),
+		networksToCreate.UnsortedList(), networksToDelete.UnsortedList())
+
+	serviceConnectivityDesired := serviceConnectivityEnabled(cnc)
+	podConnectivityDesired := podConnectivityEnabled(cnc)
+	partialConnectivityWasEnabled := cncState.serviceNetworkConnectEnabled && !cncState.podNetworkConnectEnabled
+	partialConnectivityDesired := serviceConnectivityDesired && !podConnectivityDesired
+
+	var errs []error
+
+	// Build allocatedSubnets-shaped map (nil values; prepareLBGAndACLState only uses keys).
+	ownerKeySet := make(map[string][]*net.IPNet, len(discoveredNetworks))
+	for ownerKey := range discoveredNetworks {
+		ownerKeySet[ownerKey] = nil
 	}
 
-	return utilerrors.Join(errs...)
+	serviceLBG, partialConnState, err := c.prepareLBGAndACLState(cncName, ownerKeySet, serviceConnectivityDesired, partialConnectivityDesired)
+	if err != nil {
+		return fmt.Errorf("EVPN CNC %s: failed to prepare LBG and ACL state: %w", cncName, err)
+	}
+
+	// Pre-build the advertised network isolation override ACL (if strict isolation is enabled).
+	// Built once here and attached to each advertised network's switch inside the loop.
+	advertisedOverrideACL, err := c.prepareAdvertisedOverrideACL(cncName, ownerKeySet)
+	if err != nil {
+		return fmt.Errorf("EVPN CNC %s: failed to prepare advertised override ACL: %w", cncName, err)
+	}
+
+	// Track which switches should have the advertised override ACL for stale cleanup.
+	advertisedOverrideSwitches := sets.New[string]()
+
+	// Ensure LBG + isolation ACLs for each desired network.
+	for ownerKey, netInfo := range discoveredNetworks {
+		isNewNetwork := networksToCreate.Has(ownerKey)
+		_, networkID, err := util.ParseNetworkOwner(ownerKey)
+		if err != nil {
+			klog.Warningf("EVPN CNC %s: failed to parse owner key %s: %v", cncName, ownerKey, err)
+			continue
+		}
+
+		localActive := c.localZoneNode != nil && c.networkManager.NodeHasNetwork(c.localZoneNode.Name, netInfo.GetNetworkName())
+
+		var ops []ovsdb.Operation
+
+		// If this network is advertised with strict isolation, attach the pre-built
+		// override ACL to this network's switch so the advertised isolation drop
+		// doesn't block CNC-connected traffic.
+		if advertisedOverrideACL != nil && localActive &&
+			util.IsPodNetworkAdvertisedAtNode(netInfo, c.localZoneNode.Name) {
+			advertisedSwitchName, err := c.getNetworkSwitchName(netInfo)
+			if err != nil {
+				errs = append(errs, fmt.Errorf("EVPN CNC %s: failed to get switch name for network %s: %w",
+					cncName, netInfo.GetNetworkName(), err))
+				continue
+			}
+			advertisedOverrideSwitches.Insert(advertisedSwitchName)
+			ops, err = c.ensureAdvertisedOverrideACLOps(ops, advertisedOverrideACL, advertisedSwitchName)
+			if err != nil {
+				errs = append(errs, fmt.Errorf("EVPN CNC %s: failed to ensure advertised override ACL for network %s: %w",
+					cncName, netInfo.GetNetworkName(), err))
+				continue
+			}
+		}
+
+		if serviceConnectivityDesired {
+			ops, err = c.ensureLoadBalancerGroupOps(ops, serviceLBG, netInfo, localActive)
+			if err != nil {
+				errs = append(errs, fmt.Errorf("EVPN CNC %s: failed LBG ops for network %s: %w", cncName, ownerKey, err))
+				continue
+			}
+		}
+
+		if partialConnectivityDesired {
+			ops, err = c.ensurePartialConnectivityACLsOps(ops, partialConnState, networkID)
+			if err != nil {
+				errs = append(errs, fmt.Errorf("EVPN CNC %s: failed partial ACL ops for network %s: %w", cncName, ownerKey, err))
+				continue
+			}
+		}
+
+		if len(ops) > 0 {
+			if _, err := libovsdbops.TransactAndCheck(c.nbClient, ops); err != nil {
+				errs = append(errs, fmt.Errorf("EVPN CNC %s: failed to transact ops for network %s: %w", cncName, ownerKey, err))
+				continue
+			}
+		}
+
+		if isNewNetwork {
+			klog.Infof("EVPN CNC %s: connected network %s (local=%v)", cncName, ownerKey, localActive)
+			cncState.connectedNetworks.Insert(ownerKey)
+		}
+	}
+
+	// Remove LBG and ACLs for networks no longer in the CNC.
+	for ownerKey := range networksToDelete {
+		klog.V(5).Infof("EVPN CNC %s: cleaning up stale network %s", cncName, ownerKey)
+		_, networkID, err := util.ParseNetworkOwner(ownerKey)
+		if err != nil {
+			klog.Warningf("EVPN CNC %s: failed to parse stale owner key %s: %v", cncName, ownerKey, err)
+			continue
+		}
+
+		var deleteOps []ovsdb.Operation
+		deleteOps, err = c.buildStaleNetworkSharedDeleteOps(deleteOps, cncName, networkID, serviceConnectivityDesired, partialConnectivityWasEnabled)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("EVPN CNC %s: failed to cleanup stale network %s: %w", cncName, ownerKey, err))
+		}
+		if len(deleteOps) > 0 {
+			if _, err := libovsdbops.TransactAndCheck(c.nbClient, deleteOps); err != nil {
+				errs = append(errs, fmt.Errorf("EVPN CNC %s: failed to transact cleanup for stale network %s: %w", cncName, ownerKey, err))
+				continue
+			}
+		}
+		cncState.connectedNetworks.Delete(ownerKey)
+	}
+
+	// Remove the advertised override ACL from switches where the network is no longer advertised.
+	if err := c.cleanupStaleAdvertisedOverrideACLs(cncName, advertisedOverrideSwitches, partialConnectivityDesired); err != nil {
+		errs = append(errs, fmt.Errorf("EVPN CNC %s: failed to cleanup stale advertised override ACLs: %w", cncName, err))
+	}
+
+	return c.finalizeConnectivitySync(cncName, cncState,
+		serviceConnectivityDesired, podConnectivityDesired,
+		partialConnectivityWasEnabled, partialConnectivityDesired,
+		errs)
 }
 
 // cleanupNetworkConnections removes all network connections for a CNC.

@@ -1138,7 +1138,7 @@ func TestSyncNetworkConnectionsInactiveNetwork(t *testing.T) {
 	}
 
 	// First sync: netB inactive locally, but active remotely on node2.
-	err = c.syncNetworkConnections(cnc, allocatedSubnets)
+	err = c.syncGeneveNetworkConnections(cnc, allocatedSubnets)
 	g.Expect(err).ToNot(gomega.HaveOccurred())
 
 	policies, err := libovsdbops.FindLogicalRouterPoliciesWithPredicate(nbClient, func(item *nbdb.LogicalRouterPolicy) bool {
@@ -1186,7 +1186,7 @@ func TestSyncNetworkConnectionsInactiveNetwork(t *testing.T) {
 
 	// Deactivate remote netB and re-sync: remote routes and remote connect port should be removed.
 	nm.nodeHas["node2"]["netB"] = false
-	err = c.syncNetworkConnections(cnc, allocatedSubnets)
+	err = c.syncGeneveNetworkConnections(cnc, allocatedSubnets)
 	g.Expect(err).ToNot(gomega.HaveOccurred())
 
 	routes, err = libovsdbops.FindLogicalRouterStaticRoutesWithPredicate(nbClient, func(item *nbdb.LogicalRouterStaticRoute) bool {
@@ -1204,7 +1204,7 @@ func TestSyncNetworkConnectionsInactiveNetwork(t *testing.T) {
 
 	// Activate local netB and re-sync: local router ports and reverse policies should be created.
 	nm.nodeHas["node1"]["netB"] = true
-	err = c.syncNetworkConnections(cnc, allocatedSubnets)
+	err = c.syncGeneveNetworkConnections(cnc, allocatedSubnets)
 	g.Expect(err).ToNot(gomega.HaveOccurred())
 
 	ports, err = libovsdbops.FindLogicalRouterPortWithPredicate(nbClient, func(item *nbdb.LogicalRouterPort) bool {

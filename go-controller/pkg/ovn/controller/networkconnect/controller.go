@@ -15,6 +15,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/sets"
 	corev1listers "k8s.io/client-go/listers/core/v1"
@@ -28,12 +29,17 @@ import (
 	controllerutil "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/controller"
 	networkconnectv1 "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/clusternetworkconnect/v1"
 	networkconnectlisters "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/clusternetworkconnect/v1/apis/listers/clusternetworkconnect/v1"
+	apitypes "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/types"
+	userdefinednetworkv1 "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/userdefinednetwork/v1"
 	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/factory"
 	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/networkmanager"
 	addressset "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/ovn/address_set"
 	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/types"
 	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
+	utilerrors "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util/errors"
 )
+
+var cudnGVK = userdefinednetworkv1.SchemeGroupVersion.WithKind("ClusterUserDefinedNetwork")
 
 const (
 	controllerName         = "ovnkube-network-connect-controller"
@@ -92,9 +98,13 @@ type Controller struct {
 	// cncCache holds the state for each CNC keyed by CNC name
 	cncCache map[string]*networkConnectState
 
-	// cncNetworkIDs tracks desired owner network IDs from each CNC's subnet annotation.
+	// cncNetworkIDs tracks the network IDs associated with each CNC.
+	// For Geneve CNCs these come from the subnet annotation; for EVPN CNCs they are
+	// derived from the locally-discovered CUDN networks after each successful sync.
 	cncNetworkIDs map[string]sets.Set[int]
-	// cncsByNetworkID indexes CNCs by desired owner network ID for targeted requeues.
+	// cncsByNetworkID indexes CNCs by network ID for targeted requeues
+	// (reverse of cncNetworkIDs). syncNAD uses it to find which CNCs need
+	// requeueing when a NAD (and its network) is added or removed.
 	cncsByNetworkID map[int]sets.Set[string]
 
 	// localZoneNode is the node in this controller's zone.
@@ -107,8 +117,10 @@ type Controller struct {
 type networkConnectState struct {
 	// name of the ClusterNetworkConnect
 	name string
-	// tunnelID for the connect router
+	// tunnelID for the connect router (Geneve transport only; 0 for EVPN)
 	tunnelID int
+	// isEVPN is true when the CNC uses EVPN transport (no connect-router, no connect ports)
+	isEVPN bool
 	// connectedNetworks is the set of owner keys (e.g., "layer3_1", "layer2_2") for networks
 	// connected by this CNC. Used to track OVN resources created and detect NAD matching changes.
 	connectedNetworks sets.Set[string]
@@ -140,13 +152,13 @@ func NewController(
 	serviceLister := wf.ServiceCoreInformer().Lister()
 
 	c := &Controller{
-		zone:              zone,
-		nbClient:          nbClient,
-		wf:                wf,
-		cncLister:         cncLister,
-		nodeLister:        nodeLister,
-		nadLister:         nadLister,
-		serviceLister:     serviceLister,
+		zone:          zone,
+		nbClient:      nbClient,
+		wf:            wf,
+		cncLister:     cncLister,
+		nodeLister:    nodeLister,
+		nadLister:     nadLister,
+		serviceLister: serviceLister,
 		networkManager:    networkManager,
 		addressSetFactory: addressset.NewOvnAddressSetFactory(nbClient, config.IPv4Mode, config.IPv6Mode),
 		cncCache:          make(map[string]*networkConnectState),
@@ -451,6 +463,20 @@ func cncNeedsUpdate(oldObj, newObj *networkconnectv1.ClusterNetworkConnect) bool
 		return true
 	}
 
+	// For EVPN CNCs, process when the VID annotation is set (signals L2VNI/L3VNI readiness
+	// from the cluster manager).
+	oldVID := ""
+	newVID := ""
+	if oldObj.Annotations != nil {
+		oldVID = oldObj.Annotations[util.OvnCNCEVPNParentVRFVIDAnnotation]
+	}
+	if newObj.Annotations != nil {
+		newVID = newObj.Annotations[util.OvnCNCEVPNParentVRFVIDAnnotation]
+	}
+	if oldVID != newVID {
+		return true
+	}
+
 	// Process if connectivity changed
 	if !reflect.DeepEqual(oldObj.Spec.Connectivity, newObj.Spec.Connectivity) {
 		return true
@@ -726,6 +752,34 @@ func (c *Controller) syncCNC(cnc *networkconnectv1.ClusterNetworkConnect) error 
 		}
 		c.cncCache[cnc.Name] = cncState
 	}
+
+	// EVPN transport: no connect-router, no subnet allocations, no connect ports or routing.
+	// Apply LBG and isolation ACLs so service traffic can flow across the EVPN fabric.
+	if cnc.Spec.EVPNConfiguration != nil {
+		cncState.isEVPN = true
+		discoveredNetworks, err := c.discoverEVPNCNCNetworks(cnc)
+		if err != nil {
+			return fmt.Errorf("failed to discover networks for EVPN CNC %s: %w", cnc.Name, err)
+		}
+		if err := c.syncEVPNNetworkConnections(cnc, cncState, discoveredNetworks); err != nil {
+			return fmt.Errorf("failed to sync EVPN network connections for CNC %s: %w", cnc.Name, err)
+		}
+		// Keep the network-ID index up to date so syncNAD can requeue this CNC
+		// when a CUDN NAD is added or removed (e.g. to rebuild the partial-connectivity
+		// address set and clean up stale LBG attachments).
+		evpnNetworkIDs := sets.New[int]()
+		for ownerKey := range discoveredNetworks {
+			_, networkID, err := util.ParseNetworkOwner(ownerKey)
+			if err == nil {
+				evpnNetworkIDs.Insert(networkID)
+			}
+		}
+		c.Lock()
+		c.updateCNCNetworkIDsLocked(cnc.Name, evpnNetworkIDs)
+		c.Unlock()
+		return nil
+	}
+
 	allocatedSubnets, err := util.ParseNetworkConnectSubnetAnnotation(cnc)
 	if err != nil {
 		c.updateCNCNetworkIDsLocked(cnc.Name, nil)
@@ -755,10 +809,58 @@ func (c *Controller) syncCNC(cnc *networkconnectv1.ClusterNetworkConnect) error 
 		cncState.tunnelID = tunnelID
 	}
 
-	if err := c.syncNetworkConnections(cnc, allocatedSubnets); err != nil {
+	if err := c.syncGeneveNetworkConnections(cnc, allocatedSubnets); err != nil {
 		return fmt.Errorf("failed to sync network connections for CNC %s: %v", cnc.Name, err)
 	}
 	return nil
+}
+
+// discoverEVPNCNCNetworks resolves the CUDN networks selected by an EVPN CNC without
+// relying on subnet annotations. Only ClusterUserDefinedNetworks selectors are processed:
+// namespace-scoped UDNs (PrimaryUserDefinedNetworks) do not support EVPN transport and
+// are therefore skipped.
+// Returns a map of owner-key → NetInfo for every matching CUDN network.
+func (c *Controller) discoverEVPNCNCNetworks(cnc *networkconnectv1.ClusterNetworkConnect) (map[string]util.NetInfo, error) {
+	result := map[string]util.NetInfo{}
+	var errs []error
+
+	for _, selector := range cnc.Spec.NetworkSelectors {
+		if selector.NetworkSelectionType != apitypes.ClusterUserDefinedNetworks {
+			// Only CUDNs support EVPN transport; skip all other selector types.
+			continue
+		}
+		if selector.ClusterUserDefinedNetworkSelector == nil {
+			continue
+		}
+		sel, err := metav1.LabelSelectorAsSelector(&selector.ClusterUserDefinedNetworkSelector.NetworkSelector)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("failed to parse CUDN selector: %w", err))
+			continue
+		}
+		// List NADs across all namespaces (CUDNs create NADs in user namespaces).
+		nads, err := c.nadLister.List(sel)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("failed to list NADs for CUDN selector: %w", err))
+			continue
+		}
+		for _, nad := range nads {
+			// Only NADs controlled by a ClusterUserDefinedNetwork.
+			ctrl := metav1.GetControllerOfNoCopy(nad)
+			if ctrl == nil || ctrl.Kind != cudnGVK.Kind || ctrl.APIVersion != cudnGVK.GroupVersion().String() {
+				continue
+			}
+			nadKey := util.GetNADName(nad.Namespace, nad.Name)
+			netInfo := c.networkManager.GetNetInfoForNADKey(nadKey)
+			if netInfo == nil {
+				klog.V(5).Infof("EVPN CNC %s: no NetInfo for NAD %s, will retry on next update", cnc.Name, nadKey)
+				continue
+			}
+			ownerKey := util.ComputeNetworkOwner(netInfo.TopologyType(), netInfo.GetNetworkID())
+			result[ownerKey] = netInfo
+		}
+	}
+
+	return result, utilerrors.Join(errs...)
 }
 
 // cleanupCNC removes OVN resources for a deleted CNC.
@@ -777,9 +879,11 @@ func (c *Controller) cleanupCNC(cncName string) error {
 		return fmt.Errorf("failed to cleanup network connections for CNC %s: %v", cncName, err)
 	}
 
-	// Remove the connect router
-	if err := c.deleteConnectRouter(cncName); err != nil {
-		return fmt.Errorf("failed to delete connect router for CNC %s: %v", cncName, err)
+	// EVPN CNCs have no connect router; skip deletion for them.
+	if !cncState.isEVPN {
+		if err := c.deleteConnectRouter(cncName); err != nil {
+			return fmt.Errorf("failed to delete connect router for CNC %s: %v", cncName, err)
+		}
 	}
 
 	// Remove from cache
