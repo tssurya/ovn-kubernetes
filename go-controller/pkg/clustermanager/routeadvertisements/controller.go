@@ -1408,19 +1408,11 @@ func (c *Controller) generateFRRConfiguration(
 		}
 	}
 
-	// For MAC-VRF-only CNC children: add a structured Router.Imports entry so
-	// FRR imports routes from the CNC parent VRF into the child VRF.  IP-VRF
-	// children are handled via raw config in generateRawConfig instead.
-	for _, cncCfg := range selectedNetworks.cncParentVRFConfigs {
-		for _, childVRF := range cncCfg.MACVRFOnlyChildVRFNames {
-			idx := slices.IndexFunc(routers, func(r frrtypes.Router) bool { return r.VRF == childVRF })
-			if idx >= 0 {
-				routers[idx].Imports = append(routers[idx].Imports, frrtypes.Import{VRF: cncCfg.ParentVRFName})
-			}
-			// If no router for this child VRF, the network is not active on
-			// this node — skip; it will be added once the node becomes active.
-		}
-	}
+	// MAC-VRF-only CNC children are handled entirely via raw config in
+	// generateRawConfig: a dedicated "router bgp vrf" stanza with
+	// "redistribute connected" and "import vrf <parent>" is emitted there,
+	// because "redistribute connected" has no equivalent in the structured
+	// frr-k8s FRRConfiguration API.
 
 	// Generate raw config, if any.
 	// TODO: once frr-k8s provides a typed API for this config, we can use that instead of raw config

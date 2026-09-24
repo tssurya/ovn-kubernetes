@@ -117,11 +117,17 @@ func generateRawConfig(selected *selectedNetworks, vrfNeighbors map[string][]str
 	// CUDNs selected by this RA. The parent VRF owns the L3 VNI and imports
 	// routes from all child VRFs. IP-VRF children additionally need a raw
 	// route-map stanza to prevent re-advertisement of imported routes.
+	// MAC-VRF-only children need a dedicated BGP VRF stanza with redistribute
+	// connected so their subnets enter the BGP RIB and can be imported by the
+	// parent and advertised as EVPN type-5 routes.
 	globalASN := vrfASNs[""]
 	for _, cncCfg := range selected.cncParentVRFConfigs {
 		buf.WriteString(genCNCParentVRFSection(cncCfg.ParentVRFName, globalASN, cncCfg.ParentVNI, cncCfg.ChildVRFNames))
 		for _, child := range cncCfg.IPVRFChildren {
 			buf.WriteString(genCNCIPVRFChildImportSection(child.VRFName, cncCfg.ParentVRFName, globalASN, child.Subnets))
+		}
+		for _, childVRF := range cncCfg.MACVRFOnlyChildVRFNames {
+			buf.WriteString(genCNCMACVRFChildSection(childVRF, cncCfg.ParentVRFName, globalASN))
 		}
 	}
 
@@ -374,13 +380,62 @@ func genCNCParentVRFSection(parentVRFName string, asn uint32, l3VNI int32, child
 	return buf.String()
 }
 
+// genCNCMACVRFChildSection generates the raw FRR stanza for a MAC-VRF-only child
+// connected to a CNC parent VRF. MAC-VRF-only children have no dedicated IP-VRF VNI,
+// so the CNC parent VRF acts as their shared IP-VRF. This stanza:
+//   - redistributes connected routes into BGP so the parent can import and type-5-advertise them
+//   - imports routes from the parent VRF for cross-network reachability
+//
+// Generated config structure:
+//
+//	router bgp <asn> vrf <childVRFName>
+//	 address-family ipv4 unicast
+//	  redistribute connected
+//	  import vrf <parentVRFName>
+//	 exit-address-family
+//	 address-family ipv6 unicast
+//	  redistribute connected
+//	  import vrf <parentVRFName>
+//	 exit-address-family
+//	 address-family l2vpn evpn
+//	  advertise ipv4 unicast
+//	  advertise ipv6 unicast
+//	 exit-address-family
+//	exit
+//	!
+func genCNCMACVRFChildSection(childVRFName, parentVRFName string, asn uint32) string {
+	if asn == 0 {
+		return ""
+	}
+
+	var buf strings.Builder
+
+	fmt.Fprintf(&buf, "router bgp %d vrf %s\n", asn, childVRFName)
+
+	buf.WriteString(" address-family ipv4 unicast\n")
+	buf.WriteString("  redistribute connected\n")
+	fmt.Fprintf(&buf, "  import vrf %s\n", parentVRFName)
+	buf.WriteString(" exit-address-family\n")
+
+	buf.WriteString(" address-family ipv6 unicast\n")
+	buf.WriteString("  redistribute connected\n")
+	fmt.Fprintf(&buf, "  import vrf %s\n", parentVRFName)
+	buf.WriteString(" exit-address-family\n")
+
+	buf.WriteString(" address-family l2vpn evpn\n")
+	buf.WriteString("  advertise ipv4 unicast\n")
+	buf.WriteString("  advertise ipv6 unicast\n")
+	buf.WriteString(" exit-address-family\n")
+
+	buf.WriteString("exit\n!\n")
+
+	return buf.String()
+}
+
 // genCNCIPVRFChildImportSection generates the raw FRR stanza needed for an IP-VRF
 // child connected to a CNC parent VRF. It adds a route-map on "advertise ipv4 unicast"
 // to prevent routes imported from the parent VRF from being re-advertised under the
 // child's own route-target — there is no structured FRRConfiguration equivalent for this.
-//
-// MAC-VRF-only children only need `import vrf <parent>` which is expressible via the
-// structured Router.Imports API in FRRConfiguration and should be handled there instead.
 //
 //	ip prefix-list CNC-<CHILD>-PREFIXES seq 10 permit <subnet1>
 //	ip prefix-list CNC-<CHILD>-PREFIXES seq 20 permit <subnet2>
