@@ -374,7 +374,7 @@ exit
 			l3VNI:           5000,
 			childVRFNames:   []string{"blue-udn-vrf"},
 			allChildSubnets: []*net.IPNet{mustParseCIDR("10.1.0.0/24")},
-			want: `ip prefix-list CNC-CNC-TENANT-VRF-PREFIXES seq 10 permit 10.1.0.0/24
+			want: `ip prefix-list CNC-CNC-TENANT-VRF-PREFIXES seq 10 permit 10.1.0.0/24 le 32
 !
 route-map CNC-CNC-TENANT-VRF-IMPORT permit 10
  match ip address prefix-list CNC-CNC-TENANT-VRF-PREFIXES
@@ -430,8 +430,8 @@ exit
 				mustParseCIDR("10.2.0.0/24"), // green (unsorted input)
 				mustParseCIDR("10.1.0.0/24"), // blue
 			},
-			want: `ip prefix-list CNC-CNC-TENANT-VRF-PREFIXES seq 10 permit 10.1.0.0/24
-ip prefix-list CNC-CNC-TENANT-VRF-PREFIXES seq 20 permit 10.2.0.0/24
+			want: `ip prefix-list CNC-CNC-TENANT-VRF-PREFIXES seq 10 permit 10.1.0.0/24 le 32
+ip prefix-list CNC-CNC-TENANT-VRF-PREFIXES seq 20 permit 10.2.0.0/24 le 32
 !
 route-map CNC-CNC-TENANT-VRF-IMPORT permit 10
  match ip address prefix-list CNC-CNC-TENANT-VRF-PREFIXES
@@ -489,7 +489,7 @@ func TestGenCNCIPVRFChildImportSection(t *testing.T) {
 			parentVRFName: "cnc-tenant-vrf",
 			asn:           65000,
 			childSubnets:  []*net.IPNet{mustParseCIDR("10.1.0.0/24")},
-			want: `ip prefix-list CNC-BLUE-UDN-VRF-PREFIXES seq 10 permit 10.1.0.0/24
+			want: `ip prefix-list CNC-BLUE-UDN-VRF-PREFIXES seq 10 permit 10.1.0.0/24 le 32
 !
 route-map CNC-BLUE-UDN-VRF-ADVERTISE permit 10
  match ip address prefix-list CNC-BLUE-UDN-VRF-PREFIXES
@@ -516,8 +516,8 @@ exit
 			parentVRFName: "cnc-tenant-vrf",
 			asn:           65000,
 			childSubnets:  []*net.IPNet{mustParseCIDR("10.2.0.0/24"), mustParseCIDR("10.1.0.0/24")}, // unsorted input
-			want: `ip prefix-list CNC-BLUE-UDN-VRF-PREFIXES seq 10 permit 10.1.0.0/24
-ip prefix-list CNC-BLUE-UDN-VRF-PREFIXES seq 20 permit 10.2.0.0/24
+			want: `ip prefix-list CNC-BLUE-UDN-VRF-PREFIXES seq 10 permit 10.1.0.0/24 le 32
+ip prefix-list CNC-BLUE-UDN-VRF-PREFIXES seq 20 permit 10.2.0.0/24 le 32
 !
 route-map CNC-BLUE-UDN-VRF-ADVERTISE permit 10
  match ip address prefix-list CNC-BLUE-UDN-VRF-PREFIXES

@@ -397,7 +397,9 @@ func genCNCParentVRFSection(parentVRFName string, asn uint32, l3VNI int32, child
 	// and being re-advertised cross-CUDN as EVPN Type-5.
 	if len(v4Subnets) > 0 {
 		for i, subnet := range v4Subnets {
-			fmt.Fprintf(&buf, "ip prefix-list %s seq %d permit %s\n", prefixList, (i+1)*10, subnet)
+			// le 32: permit the CUDN aggregate and all more-specific subnets (e.g. per-node
+			// /24 slices of a Layer3 CUDN that FRR learns from import vrf).
+			fmt.Fprintf(&buf, "ip prefix-list %s seq %d permit %s le 32\n", prefixList, (i+1)*10, subnet)
 		}
 		buf.WriteString("!\n")
 		fmt.Fprintf(&buf, "route-map %s permit 10\n", importMap)
@@ -502,7 +504,7 @@ func genCNCMACVRFChildSection(childVRFName, parentVRFName string, asn uint32, ch
 
 	if len(v4Subnets) > 0 {
 		for i, subnet := range v4Subnets {
-			fmt.Fprintf(&buf, "ip prefix-list %s seq %d permit %s\n", v4PrefixList, (i+1)*10, subnet)
+			fmt.Fprintf(&buf, "ip prefix-list %s seq %d permit %s le 32\n", v4PrefixList, (i+1)*10, subnet)
 		}
 		buf.WriteString("!\n")
 		fmt.Fprintf(&buf, "route-map %s deny 10\n", v4ImportMap)
@@ -512,7 +514,7 @@ func genCNCMACVRFChildSection(childVRFName, parentVRFName string, asn uint32, ch
 	}
 	if len(v6Subnets) > 0 {
 		for i, subnet := range v6Subnets {
-			fmt.Fprintf(&buf, "ipv6 prefix-list %s seq %d permit %s\n", v6PrefixList, (i+1)*10, subnet)
+			fmt.Fprintf(&buf, "ipv6 prefix-list %s seq %d permit %s le 128\n", v6PrefixList, (i+1)*10, subnet)
 		}
 		buf.WriteString("!\n")
 		fmt.Fprintf(&buf, "route-map %s deny 10\n", v6ImportMap)
@@ -608,7 +610,9 @@ func genCNCIPVRFChildImportSection(childVRFName, parentVRFName string, asn uint3
 
 	if len(v4Subnets) > 0 {
 		for i, subnet := range v4Subnets {
-			fmt.Fprintf(&buf, "ip prefix-list %s seq %d permit %s\n", prefixList, (i+1)*10, subnet)
+			// le 32: match the CUDN aggregate and all more-specific subnets (e.g. per-node
+			// /24 slices that L3 CUDNs advertise in FRR BGP). Exact-match would miss them.
+			fmt.Fprintf(&buf, "ip prefix-list %s seq %d permit %s le 32\n", prefixList, (i+1)*10, subnet)
 		}
 		buf.WriteString("!\n")
 		// Advertise route-map: permit own subnets only (blocks re-advertisement of
