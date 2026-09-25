@@ -1878,7 +1878,7 @@ func (c *Controller) populateCNCParentVRFConfigs(selected *selectedNetworks, net
 
 		var childVRFNames []string
 		var ipVRFChildren []*cncIPVRFChild
-		var macVRFOnlyChildVRFNames []string
+		var macVRFOnlyChildren []*cncIPVRFChild
 
 		for _, networkName := range sets.List(coveredNetworks) {
 			network := c.nm.GetNetwork(networkName)
@@ -1891,33 +1891,39 @@ func (c *Controller) populateCNCParentVRFConfigs(selected *selectedNetworks, net
 			hasIPVRF := network.EVPNIPVRFVNI() > 0
 			hasMACVRFOnly := network.EVPNMACVRFVNI() > 0 && !hasIPVRF
 
+			var subnets []*net.IPNet
+			for _, entry := range network.Subnets() {
+				subnets = append(subnets, entry.CIDR)
+			}
+
 			if hasIPVRF {
-				var subnets []*net.IPNet
-				for _, entry := range network.Subnets() {
-					subnets = append(subnets, entry.CIDR)
-				}
 				ipVRFChildren = append(ipVRFChildren, &cncIPVRFChild{
 					VRFName: vrfName,
 					Subnets: subnets,
 				})
 			} else if hasMACVRFOnly {
-				macVRFOnlyChildVRFNames = append(macVRFOnlyChildVRFNames, vrfName)
+				macVRFOnlyChildren = append(macVRFOnlyChildren, &cncIPVRFChild{
+					VRFName: vrfName,
+					Subnets: subnets,
+				})
 			}
 		}
 
 		// Sort for deterministic FRR config generation.
 		slices.Sort(childVRFNames)
-		slices.Sort(macVRFOnlyChildVRFNames)
+		slices.SortFunc(macVRFOnlyChildren, func(a, b *cncIPVRFChild) int {
+			return strings.Compare(a.VRFName, b.VRFName)
+		})
 		slices.SortFunc(ipVRFChildren, func(a, b *cncIPVRFChild) int {
 			return strings.Compare(a.VRFName, b.VRFName)
 		})
 
 		selected.cncParentVRFConfigs = append(selected.cncParentVRFConfigs, &cncParentVRFConfig{
-			ParentVRFName:           parentVRFName,
-			ParentVNI:               parentVNI,
-			ChildVRFNames:           childVRFNames,
-			IPVRFChildren:           ipVRFChildren,
-			MACVRFOnlyChildVRFNames: macVRFOnlyChildVRFNames,
+			ParentVRFName:      parentVRFName,
+			ParentVNI:          parentVNI,
+			ChildVRFNames:      childVRFNames,
+			IPVRFChildren:      ipVRFChildren,
+			MACVRFOnlyChildren: macVRFOnlyChildren,
 		})
 	}
 

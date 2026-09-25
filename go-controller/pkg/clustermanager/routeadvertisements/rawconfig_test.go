@@ -428,8 +428,13 @@ func TestGenCNCIPVRFChildImportSection(t *testing.T) {
 route-map CNC-BLUE-UDN-VRF-ADVERTISE permit 10
  match ip address prefix-list CNC-BLUE-UDN-VRF-PREFIXES
 !
+route-map CNC-BLUE-UDN-VRF-IMPORT deny 10
+ match ip address prefix-list CNC-BLUE-UDN-VRF-PREFIXES
+route-map CNC-BLUE-UDN-VRF-IMPORT permit 20
+!
 router bgp 65000 vrf blue-udn-vrf
  address-family ipv4 unicast
+  import vrf route-map CNC-BLUE-UDN-VRF-IMPORT
   import vrf cnc-tenant-vrf
  exit-address-family
  address-family l2vpn evpn
@@ -451,8 +456,13 @@ ip prefix-list CNC-BLUE-UDN-VRF-PREFIXES seq 20 permit 10.2.0.0/24
 route-map CNC-BLUE-UDN-VRF-ADVERTISE permit 10
  match ip address prefix-list CNC-BLUE-UDN-VRF-PREFIXES
 !
+route-map CNC-BLUE-UDN-VRF-IMPORT deny 10
+ match ip address prefix-list CNC-BLUE-UDN-VRF-PREFIXES
+route-map CNC-BLUE-UDN-VRF-IMPORT permit 20
+!
 router bgp 65000 vrf blue-udn-vrf
  address-family ipv4 unicast
+  import vrf route-map CNC-BLUE-UDN-VRF-IMPORT
   import vrf cnc-tenant-vrf
  exit-address-family
  address-family l2vpn evpn
@@ -463,7 +473,7 @@ exit
 `,
 		},
 		{
-			name:          "IP-VRF child with no subnets — route-map emitted without prefix-list",
+			name:          "IP-VRF child with no subnets — no import route-map, bare import vrf",
 			childVRFName:  "blue-udn-vrf",
 			parentVRFName: "cnc-tenant-vrf",
 			asn:           65000,
