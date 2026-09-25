@@ -333,6 +333,14 @@ func (c *Controller) syncNetworkRef(key string) error {
 	}
 
 	c.reconcileCNCsForNetworkIDs(c.networkIDsForNetworkName(networkName)...)
+
+	// A render signal means the network just became available locally, which is
+	// exactly when an EVPN CNC that selected it (but discovered nothing earlier)
+	// must re-sync. The network-ID index above may still be empty for such a CNC,
+	// so also fan out by selector using the network's NADs.
+	for _, nadKey := range c.networkManager.GetNADKeysForNetwork(networkName) {
+		c.reconcileEVPNCNCsForNADKey(nadKey)
+	}
 	return nil
 }
 
@@ -340,6 +348,14 @@ func (c *Controller) syncNAD(key string) error {
 	if c.networkManager == nil {
 		return nil
 	}
+
+	// EVPN CNCs discover their member networks by selector, not from the subnet
+	// annotation (EVPN networks get none). A newly added NAD can therefore match
+	// an EVPN CNC's selector before its network is rendered and before it appears
+	// in the network-ID index. Fan out to matching EVPN CNCs directly so the join
+	// is picked up regardless of discovery order or NetInfo readiness.
+	c.reconcileEVPNCNCsForNADKey(key)
+
 	nadNetwork := c.networkManager.GetNetInfoForNADKey(key)
 	if nadNetwork != nil {
 		// Common path: the NAD's network is rendered, so we can requeue
@@ -358,6 +374,87 @@ func (c *Controller) syncNAD(key string) error {
 	networkName := c.networkManager.GetNetworkNameForNADKey(key)
 	c.reconcileCNCsForNetworkIDs(c.networkIDsForNetworkName(networkName)...)
 	return nil
+}
+
+// reconcileEVPNCNCsForNADKey requeues every EVPN CNC whose CUDN selector matches
+// the given NAD. Unlike the network-ID index paths, this does not require the CNC
+// to have already discovered the network, so it wakes CNCs on a fresh join even
+// before the network's NetInfo is rendered locally.
+//
+// On a NAD delete the labels are gone (this reconciler is fed by key, not object,
+// so there is no informer tombstone to read); we conservatively requeue all EVPN
+// CNCs so any that referenced the removed network reconciles its removal.
+func (c *Controller) reconcileEVPNCNCsForNADKey(nadKey string) {
+	if c.cncController == nil || c.cncLister == nil || c.nadLister == nil {
+		return
+	}
+	cncs, err := c.cncLister.List(labels.Everything())
+	if err != nil {
+		klog.Warningf("Network connect: failed to list CNCs for NAD %s fan-out: %v", nadKey, err)
+		return
+	}
+	// Nothing to do if there are no EVPN CNCs (the common case in clusters not
+	// using EVPN transport); avoids the NAD lookup below entirely.
+	var evpnCNCs []*networkconnectv1.ClusterNetworkConnect
+	for _, cnc := range cncs {
+		if cnc.Spec.EVPNConfiguration != nil {
+			evpnCNCs = append(evpnCNCs, cnc)
+		}
+	}
+	if len(evpnCNCs) == 0 {
+		return
+	}
+
+	ns, name, err := cache.SplitMetaNamespaceKey(nadKey)
+	if err != nil {
+		klog.Warningf("Network connect: invalid NAD key %q for EVPN fan-out: %v", nadKey, err)
+		return
+	}
+	nad, err := c.nadLister.NetworkAttachmentDefinitions(ns).Get(name)
+	if err != nil {
+		if !apierrors.IsNotFound(err) {
+			klog.Warningf("Network connect: failed to get NAD %s for EVPN fan-out: %v", nadKey, err)
+			return
+		}
+		// NAD deleted: requeue all EVPN CNCs so a possible member removal is reconciled.
+		for _, cnc := range evpnCNCs {
+			c.cncController.Reconcile(cnc.Name)
+		}
+		return
+	}
+	// Only NADs owned by a ClusterUserDefinedNetwork can back an EVPN network.
+	ctrl := metav1.GetControllerOfNoCopy(nad)
+	if ctrl == nil || ctrl.Kind != cudnGVK.Kind || ctrl.APIVersion != cudnGVK.GroupVersion().String() {
+		return
+	}
+	nadLabels := labels.Set(nad.Labels)
+	for _, cnc := range evpnCNCs {
+		if cncSelectsLabels(cnc, nadLabels) {
+			c.cncController.Reconcile(cnc.Name)
+		}
+	}
+}
+
+// cncSelectsLabels reports whether any ClusterUserDefinedNetworks selector on the
+// CNC matches the given NAD labels.
+func cncSelectsLabels(cnc *networkconnectv1.ClusterNetworkConnect, nadLabels labels.Set) bool {
+	for _, selector := range cnc.Spec.NetworkSelectors {
+		if selector.NetworkSelectionType != apitypes.ClusterUserDefinedNetworks {
+			continue
+		}
+		if selector.ClusterUserDefinedNetworkSelector == nil {
+			continue
+		}
+		sel, err := metav1.LabelSelectorAsSelector(&selector.ClusterUserDefinedNetworkSelector.NetworkSelector)
+		if err != nil {
+			klog.Warningf("Network connect: CNC %s has invalid CUDN selector: %v", cnc.Name, err)
+			continue
+		}
+		if sel.Matches(nadLabels) {
+			return true
+		}
+	}
+	return false
 }
 
 func networkIDsFromAllocatedSubnets(allocatedSubnets map[string][]*net.IPNet) sets.Set[int] {
