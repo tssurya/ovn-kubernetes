@@ -674,6 +674,14 @@ func (c *Controller) syncEVPNNetworkConnections(
 ) error {
 	cncName := cnc.Name
 
+	// EVPN skips the connect-router (and thus connect ports and static routes), but
+	// it still needs c.localZoneNode populated: the advertised-override ACL and the
+	// local LBG attachment are gated on localActive, which dereferences localZoneNode.
+	// Unlike the Geneve path, nothing else sets it here, so compute it up front.
+	if _, _, err := c.computeNodeInfo(); err != nil {
+		return fmt.Errorf("EVPN CNC %s: failed to compute node info: %w", cncName, err)
+	}
+
 	desiredNetworks := sets.New[string]()
 	for ownerKey := range discoveredNetworks {
 		desiredNetworks.Insert(ownerKey)
