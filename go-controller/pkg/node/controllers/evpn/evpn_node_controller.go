@@ -42,6 +42,7 @@ import (
 	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/kube"
 	libovsdbops "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/libovsdb/ops"
 	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/networkmanager"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/node"
 	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/node/netlinkdevicemanager"
 	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/types"
 	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
@@ -209,8 +210,16 @@ func NewController(nodeName string, wf factory.NodeWatchFactory, kube kube.Inter
 		c.cncLister = cncInformer.Lister()
 		c.nadLister = wf.NADInformer().Lister()
 		c.cncController = controller.NewController("evpn-node-cnc-controller", &controller.ControllerConfig[networkconnectv1.ClusterNetworkConnect]{
-			RateLimiter:    workqueue.DefaultTypedControllerRateLimiter[string](),
-			Reconcile:      func(_ string) error { c.vtepController.ReconcileAll(); return nil },
+			RateLimiter: workqueue.DefaultTypedControllerRateLimiter[string](),
+			Reconcile: func(_ string) error {
+				// The udn-bgp-drop exemptions are node-global and CNC-driven, so
+				// reconcile them once here rather than per VTEP.
+				if err := c.reconcileCNCIsolationExemptions(); err != nil {
+					return err
+				}
+				c.vtepController.ReconcileAll()
+				return nil
+			},
 			ObjNeedsUpdate: cncNodeNeedsUpdate,
 			Threadiness:    1,
 			Informer:       cncInformer.Informer(),
@@ -563,14 +572,61 @@ type cncParentVRFInfo struct {
 }
 
 // cncNodeNeedsUpdate returns true when a CNC change is relevant to the node EVPN controller.
-// Watches for spec changes (networkSelectors may change which VTEP is selected) and VID
-// allocation (the readiness signal that triggers SVI creation).
+// Watches for spec changes (networkSelectors may change which VTEP is selected), VID
+// allocation (the readiness signal that triggers SVI creation), and connect-subnet
+// annotation changes (which drive the udn-bgp-drop isolation exemptions).
 func cncNodeNeedsUpdate(oldObj, newObj *networkconnectv1.ClusterNetworkConnect) bool {
 	if oldObj == nil || newObj == nil {
 		return true
 	}
 	return oldObj.Generation != newObj.Generation ||
-		oldObj.Annotations[util.OvnCNCEVPNParentVRFVIDAnnotation] != newObj.Annotations[util.OvnCNCEVPNParentVRFVIDAnnotation]
+		oldObj.Annotations[util.OvnCNCEVPNParentVRFVIDAnnotation] != newObj.Annotations[util.OvnCNCEVPNParentVRFVIDAnnotation] ||
+		util.NetworkConnectSubnetAnnotationChanged(oldObj, newObj)
+}
+
+// collectCNCConnectedSubnets returns, per EVPN CNC, the pod subnets of every
+// network the CNC connects, read from the connect-subnet annotation that the
+// clustermanager populates. Non-EVPN CNCs are skipped: their inter-UDN traffic
+// stays inside OVN and is never re-injected through the host output hook, so it
+// does not hit udn-bgp-drop.
+func (c *Controller) collectCNCConnectedSubnets() (map[string][]*net.IPNet, error) {
+	if c.cncLister == nil {
+		return nil, nil
+	}
+	cncs, err := c.cncLister.List(labels.Everything())
+	if err != nil {
+		return nil, fmt.Errorf("failed to list CNCs: %w", err)
+	}
+	result := make(map[string][]*net.IPNet)
+	for _, cnc := range cncs {
+		if cnc.Spec.EVPNConfiguration == nil {
+			continue
+		}
+		perNetwork, err := util.ParseNetworkConnectSubnetAnnotation(cnc)
+		if err != nil {
+			klog.Warningf("CNC %s: invalid connect-subnet annotation, skipping isolation exemption: %v", cnc.Name, err)
+			continue
+		}
+		var subnets []*net.IPNet
+		for _, networkSubnets := range perNetwork {
+			subnets = append(subnets, networkSubnets...)
+		}
+		if len(subnets) == 0 {
+			continue
+		}
+		result[cnc.Name] = subnets
+	}
+	return result, nil
+}
+
+// reconcileCNCIsolationExemptions refreshes the nftables exemptions that let
+// inter-UDN pod traffic between the networks a CNC connects bypass udn-bgp-drop.
+func (c *Controller) reconcileCNCIsolationExemptions() error {
+	cncSubnets, err := c.collectCNCConnectedSubnets()
+	if err != nil {
+		return err
+	}
+	return node.ReconcileCNCIsolationExemptions(cncSubnets)
 }
 
 // collectCNCParentVRFConfigs returns the desired CNC parent VRF state for a given VTEP.
