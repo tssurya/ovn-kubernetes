@@ -13,14 +13,30 @@ import (
 	utilnet "k8s.io/utils/net"
 )
 
+// cncSubnet is a child CUDN pod subnet plus the per-node host-subnet prefix
+// length that governs how the parent VRF's import prefix-list is bounded.
+//
+// HostSubnetLength is the network's configured host-subnet length: >0 for Layer3
+// CUDNs (whose aggregate is sliced into per-node subnets, e.g. a /16 split into
+// /24s) and 0 for Layer2 CUDNs (not sliced). It is NOT hardcoded — it comes from
+// config.CIDRNetworkEntry.HostSubnetLength for each subnet.
+type cncSubnet struct {
+	// CIDR is the child network's pod subnet aggregate (e.g. 10.10.0.0/16).
+	CIDR *net.IPNet
+	// HostSubnetLength is the per-node prefix length (0 for Layer2 CUDNs).
+	HostSubnetLength int
+}
+
 // cncIPVRFChild holds generation data for one IP-VRF child of an EVPN CNC parent VRF.
 type cncIPVRFChild struct {
 	// VRFName is the Linux VRF name of the child (from GetNetworkVRFName, ≤15 chars).
 	VRFName string
 	// Subnets are the child network's pod subnets, used by the route-map in
 	// genCNCIPVRFChildImportSection to prevent re-advertisement of routes
-	// imported from the parent VRF back into EVPN.
-	Subnets []*net.IPNet
+	// imported from the parent VRF back into EVPN, and by the parent import
+	// filter (genCNCParentVRFSection) to cap absorbed routes at host-subnet
+	// granularity so per-pod /32 host routes are never re-originated as Type-5.
+	Subnets []cncSubnet
 }
 
 // cncParentVRFConfig holds the FRR generation data for one EVPN CNC parent VRF.
@@ -124,7 +140,7 @@ func generateRawConfig(selected *selectedNetworks, vrfNeighbors map[string][]str
 	// enter the BGP RIB for the parent to import and type-5-advertise.
 	globalASN := vrfASNs[""]
 	for _, cncCfg := range selected.cncParentVRFConfigs {
-		var allChildSubnets []*net.IPNet
+		var allChildSubnets []cncSubnet
 		for _, child := range cncCfg.IPVRFChildren {
 			allChildSubnets = append(allChildSubnets, child.Subnets...)
 		}
@@ -334,6 +350,19 @@ func genNonDefaultVRFEVPNSection(cfg *ipVRFConfig) string {
 	return buf.String()
 }
 
+// cncPrefixListBound returns the FRR prefix-list length qualifier for a child
+// CUDN subnet in the parent VRF's import filter. For Layer3 CUDNs it returns
+// " le <HostSubnetLength>" so the aggregate and its per-node slices are permitted
+// but per-pod host routes are not; for Layer2 CUDNs (HostSubnetLength==0) it
+// returns "" (exact-match on the aggregate only). The bound is config-driven —
+// it echoes the network's configured host-subnet length, never a hardcoded value.
+func cncPrefixListBound(s cncSubnet) string {
+	if s.HostSubnetLength > 0 {
+		return fmt.Sprintf(" le %d", s.HostSubnetLength)
+	}
+	return ""
+}
+
 // genCNCParentVRFSection generates the FRR stanza for an EVPN CNC parent VRF.
 // The parent VRF is the L3 routing hub that imports routes from all child VRFs
 // and re-advertises them via EVPN Type-5 routes.
@@ -368,7 +397,7 @@ func genNonDefaultVRFEVPNSection(cfg *ipVRFConfig) string {
 //	 exit-address-family
 //	exit
 //	!
-func genCNCParentVRFSection(parentVRFName string, asn uint32, l3VNI int32, childVRFNames []string, allChildSubnets []*net.IPNet) string {
+func genCNCParentVRFSection(parentVRFName string, asn uint32, l3VNI int32, childVRFNames []string, allChildSubnets []cncSubnet) string {
 	if asn == 0 || l3VNI == 0 {
 		return ""
 	}
@@ -380,14 +409,14 @@ func genCNCParentVRFSection(parentVRFName string, asn uint32, l3VNI int32, child
 	importMap := "CNC-" + base + "-IMPORT"
 
 	// Collect and sort IPv4 subnets from all children for the parent import filter.
-	var v4Subnets []*net.IPNet
+	var v4Subnets []cncSubnet
 	for _, subnet := range allChildSubnets {
-		if subnet.IP.To4() != nil {
+		if subnet.CIDR.IP.To4() != nil {
 			v4Subnets = append(v4Subnets, subnet)
 		}
 	}
-	slices.SortFunc(v4Subnets, func(a, b *net.IPNet) int {
-		return strings.Compare(a.String(), b.String())
+	slices.SortFunc(v4Subnets, func(a, b cncSubnet) int {
+		return strings.Compare(a.CIDR.String(), b.CIDR.String())
 	})
 
 	var buf strings.Builder
@@ -397,9 +426,17 @@ func genCNCParentVRFSection(parentVRFName string, asn uint32, l3VNI int32, child
 	// and being re-advertised cross-CUDN as EVPN Type-5.
 	if len(v4Subnets) > 0 {
 		for i, subnet := range v4Subnets {
-			// le 32: permit the CUDN aggregate and all more-specific subnets (e.g. per-node
-			// /24 slices of a Layer3 CUDN that FRR learns from import vrf).
-			fmt.Fprintf(&buf, "ip prefix-list %s seq %d permit %s le 32\n", prefixList, (i+1)*10, subnet)
+			// Bound the permit at the network's host-subnet granularity, NOT /32.
+			// Layer3 CUDNs (HostSubnetLength>0) are sliced into per-node subnets
+			// (e.g. a /16 into /24s) that FRR learns via "import vrf", so permit the
+			// aggregate through "le <HostSubnetLength>". Layer2 CUDNs
+			// (HostSubnetLength==0) are not sliced, so permit only the exact
+			// aggregate. In both cases per-pod /32 host routes are excluded: the
+			// parent must not absorb them, else it re-originates them as Type-5,
+			// which echoes across every node (ECMP) and blackholes local pods whose
+			// /32 echo out-specifics the connected aggregate. Per-pod placement is
+			// handled by each network's own L2VNI Type-2 routes.
+			fmt.Fprintf(&buf, "ip prefix-list %s seq %d permit %s%s\n", prefixList, (i+1)*10, subnet.CIDR, cncPrefixListBound(subnet))
 		}
 		buf.WriteString("!\n")
 		fmt.Fprintf(&buf, "route-map %s permit 10\n", importMap)
@@ -477,7 +514,7 @@ func genCNCParentVRFSection(parentVRFName string, asn uint32, l3VNI int32, child
 //	 exit-address-family
 //	exit
 //	!
-func genCNCMACVRFChildSection(childVRFName, parentVRFName string, asn uint32, childSubnets []*net.IPNet) string {
+func genCNCMACVRFChildSection(childVRFName, parentVRFName string, asn uint32, childSubnets []cncSubnet) string {
 	if asn == 0 {
 		return ""
 	}
@@ -491,10 +528,10 @@ func genCNCMACVRFChildSection(childVRFName, parentVRFName string, asn uint32, ch
 	// Separate subnets by IP family, sort for deterministic output.
 	var v4Subnets, v6Subnets []*net.IPNet
 	for _, subnet := range childSubnets {
-		if subnet.IP.To4() != nil {
-			v4Subnets = append(v4Subnets, subnet)
+		if subnet.CIDR.IP.To4() != nil {
+			v4Subnets = append(v4Subnets, subnet.CIDR)
 		} else {
-			v6Subnets = append(v6Subnets, subnet)
+			v6Subnets = append(v6Subnets, subnet.CIDR)
 		}
 	}
 	slices.SortFunc(v4Subnets, func(a, b *net.IPNet) int { return strings.Compare(a.String(), b.String()) })
@@ -504,6 +541,10 @@ func genCNCMACVRFChildSection(childVRFName, parentVRFName string, asn uint32, ch
 
 	if len(v4Subnets) > 0 {
 		for i, subnet := range v4Subnets {
+			// le 32 here is a DENY of the child's OWN subnet (and any more-specific)
+			// coming back from the parent feedback loop — the child never needs its
+			// own address space re-imported, so capping at the aggregate is
+			// unnecessary and less robust. See the import route-map below.
 			fmt.Fprintf(&buf, "ip prefix-list %s seq %d permit %s le 32\n", v4PrefixList, (i+1)*10, subnet)
 		}
 		buf.WriteString("!\n")
@@ -563,26 +604,26 @@ func genCNCMACVRFChildSection(childVRFName, parentVRFName string, asn uint32, ch
 //     loop (parent imports child routes, re-advertises as type-5, child would otherwise
 //     re-import them creating ECMP against the type-2-derived /32 paths).
 //
-//	ip prefix-list CNC-<CHILD>-PREFIXES seq 10 permit <subnet1>
-//	ip prefix-list CNC-<CHILD>-PREFIXES seq 20 permit <subnet2>
-//	!
-//	route-map CNC-<CHILD>-ADVERTISE permit 10
-//	 match ip address prefix-list CNC-<CHILD>-PREFIXES
-//	!
-//	route-map CNC-<CHILD>-IMPORT deny 10
-//	 match ip address prefix-list CNC-<CHILD>-PREFIXES
-//	route-map CNC-<CHILD>-IMPORT permit 20
-//	!
-//	router bgp <asn> vrf <childVRFName>
-//	 address-family ipv4 unicast
-//	  import vrf route-map CNC-<CHILD>-IMPORT <parentVRFName>
-//	 exit-address-family
-//	 address-family l2vpn evpn
-//	  advertise ipv4 unicast route-map CNC-<CHILD>-ADVERTISE
-//	 exit-address-family
-//	exit
-//	!
-func genCNCIPVRFChildImportSection(childVRFName, parentVRFName string, asn uint32, childSubnets []*net.IPNet) string {
+//     ip prefix-list CNC-<CHILD>-PREFIXES seq 10 permit <subnet1>
+//     ip prefix-list CNC-<CHILD>-PREFIXES seq 20 permit <subnet2>
+//     !
+//     route-map CNC-<CHILD>-ADVERTISE permit 10
+//     match ip address prefix-list CNC-<CHILD>-PREFIXES
+//     !
+//     route-map CNC-<CHILD>-IMPORT deny 10
+//     match ip address prefix-list CNC-<CHILD>-PREFIXES
+//     route-map CNC-<CHILD>-IMPORT permit 20
+//     !
+//     router bgp <asn> vrf <childVRFName>
+//     address-family ipv4 unicast
+//     import vrf route-map CNC-<CHILD>-IMPORT <parentVRFName>
+//     exit-address-family
+//     address-family l2vpn evpn
+//     advertise ipv4 unicast route-map CNC-<CHILD>-ADVERTISE
+//     exit-address-family
+//     exit
+//     !
+func genCNCIPVRFChildImportSection(childVRFName, parentVRFName string, asn uint32, childSubnets []cncSubnet) string {
 	if asn == 0 {
 		return ""
 	}
@@ -600,8 +641,8 @@ func genCNCIPVRFChildImportSection(childVRFName, parentVRFName string, asn uint3
 	// the same prefix-list. Sorted for deterministic output.
 	var v4Subnets []*net.IPNet
 	for _, subnet := range childSubnets {
-		if subnet.IP.To4() != nil {
-			v4Subnets = append(v4Subnets, subnet)
+		if subnet.CIDR.IP.To4() != nil {
+			v4Subnets = append(v4Subnets, subnet.CIDR)
 		}
 	}
 	slices.SortFunc(v4Subnets, func(a, b *net.IPNet) int {

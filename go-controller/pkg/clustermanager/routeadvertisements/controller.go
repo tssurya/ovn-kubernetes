@@ -36,10 +36,10 @@ import (
 
 	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/config"
 	controllerutil "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/controller"
-	eiptypes "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/egressip/v1"
-	egressiplisters "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/egressip/v1/apis/listers/egressip/v1"
 	networkconnectv1 "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/clusternetworkconnect/v1"
 	networkconnectlisters "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/clusternetworkconnect/v1/apis/listers/clusternetworkconnect/v1"
+	eiptypes "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/egressip/v1"
+	egressiplisters "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/egressip/v1/apis/listers/egressip/v1"
 	ratypes "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/routeadvertisements/v1"
 	raapply "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/routeadvertisements/v1/apis/applyconfiguration/routeadvertisements/v1"
 	raclientset "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/routeadvertisements/v1/apis/clientset/versioned"
@@ -1891,9 +1891,15 @@ func (c *Controller) populateCNCParentVRFConfigs(selected *selectedNetworks, net
 			hasIPVRF := network.EVPNIPVRFVNI() > 0
 			hasMACVRFOnly := network.EVPNMACVRFVNI() > 0 && !hasIPVRF
 
-			var subnets []*net.IPNet
+			var subnets []cncSubnet
 			for _, entry := range network.Subnets() {
-				subnets = append(subnets, entry.CIDR)
+				// Carry HostSubnetLength so the parent import filter can cap
+				// absorbed routes at host-subnet granularity (Layer3) or the exact
+				// aggregate (Layer2, where HostSubnetLength is 0) rather than /32.
+				subnets = append(subnets, cncSubnet{
+					CIDR:             entry.CIDR,
+					HostSubnetLength: entry.HostSubnetLength,
+				})
 			}
 
 			if hasIPVRF {
