@@ -871,9 +871,10 @@ func (c *Controller) syncCNC(cnc *networkconnectv1.ClusterNetworkConnect) error 
 				evpnNetworkIDs.Insert(networkID)
 			}
 		}
-		c.Lock()
+		// reconcileCNC already holds c.Lock() for the duration of syncCNC, so call
+		// the "Locked" helper directly. Re-acquiring the non-reentrant c.Mutex here
+		// self-deadlocks the worker, which stalls every subsequent CNC reconcile.
 		c.updateCNCNetworkIDsLocked(cnc.Name, evpnNetworkIDs)
-		c.Unlock()
 		return nil
 	}
 
