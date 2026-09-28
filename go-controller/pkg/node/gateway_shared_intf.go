@@ -5,12 +5,15 @@ package node
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"hash/fnv"
 	"math"
 	"net"
 	"reflect"
+	"sort"
 	"strings"
 	"sync"
 
@@ -84,6 +87,16 @@ const (
 	// nftablesAdvertisedUDNsSetV[4|6] is a set containing advertised UDN subnets
 	nftablesAdvertisedUDNsSetV4 = "advertised-udn-subnets-v4"
 	nftablesAdvertisedUDNsSetV6 = "advertised-udn-subnets-v6"
+
+	// nftablesUDNCNCAllowChain is a regular (non-base) chain jumped to from the
+	// top of nftablesUDNBGPOutputChain. It holds one accept rule pair per
+	// ClusterNetworkConnect (CNC) that exempts inter-UDN pod traffic between the
+	// networks a single CNC joins from the udn-bgp-drop chain: such traffic is
+	// routed host-side across per-UDN Linux VRFs and gets re-injected through the
+	// output hook, where it would otherwise match the advertised-UDN-subnets drop.
+	// The per-CNC rules are managed dynamically (see ReconcileCNCIsolationExemptions)
+	// so this chain is created but never flushed by the static setup path.
+	nftablesUDNCNCAllowChain = "udn-cnc-allow"
 
 	// nftablesUDNMarkNodePortsMap is a verdict maps containing
 	// localNodeIP / protocol / port keys indicating traffic that
@@ -2419,12 +2432,25 @@ func deleteMasqueradeResources(link netlink.Link, staleMasqueradeIPs *config.Mas
 //	  flags interval
 //	  comment "advertised UDN V6 subnets"
 //	}
+//	chain udn-cnc-allow {
+//	  // one accept rule pair per CNC, managed by ReconcileCNCIsolationExemptions
+//	 }
 //	chain udn-bgp-drop {
 //	  comment "Drop traffic generated locally towards advertised UDN subnets"
 //	   type filter hook output priority filter; policy accept;
+//	   jump udn-cnc-allow
 //	   ct state new ip daddr @advertised-udn-subnets-v4 counter packets 0 bytes 0 drop
 //	   ct state new ip6 daddr @advertised-udn-subnets-v6 counter packets 0 bytes 0 drop
 //	 }
+//
+// The leading jump to udn-cnc-allow gives CNC-connected inter-UDN pod traffic a
+// chance to be accepted before the drop rules below: such traffic is routed
+// host-side across per-UDN Linux VRFs and re-injected through the output hook, so
+// it would otherwise be dropped by the advertised-UDN-subnets rules. The per-CNC
+// accept rules (see ReconcileCNCIsolationExemptions) live in the separate
+// udn-cnc-allow chain so they can be reconciled dynamically without disturbing
+// these static drop rules; udn-cnc-allow is empty until a CNC connects networks,
+// so the exemption is inert by default.
 func configureAdvertisedUDNIsolationNFTables() error {
 	counterIfDebug := ""
 	if config.Logging.Level > 4 {
@@ -2446,6 +2472,11 @@ func configureAdvertisedUDNIsolationNFTables() error {
 	})
 	tx.Flush(&knftables.Chain{Name: nftablesUDNBGPOutputChain})
 
+	// Regular chain holding the per-CNC exemption rules. Create it here so the
+	// jump below always resolves, but never flush it: its contents are owned and
+	// reconciled by ReconcileCNCIsolationExemptions.
+	tx.Add(&knftables.Chain{Name: nftablesUDNCNCAllowChain})
+
 	// TODO: clean up any stale entries in advertised-udn-subnets-v[4|6]
 	set := &knftables.Set{
 		Name:    nftablesAdvertisedUDNsSetV4,
@@ -2463,6 +2494,13 @@ func configureAdvertisedUDNIsolationNFTables() error {
 	}
 	tx.Add(set)
 
+	// Give CNC-connected inter-UDN pod traffic a chance to be accepted before the
+	// drop rules below by jumping to the dynamically-managed udn-cnc-allow chain.
+	tx.Add(&knftables.Rule{
+		Chain: nftablesUDNBGPOutputChain,
+		Rule:  knftables.Concat("jump", nftablesUDNCNCAllowChain),
+	})
+
 	tx.Add(&knftables.Rule{
 		Chain: nftablesUDNBGPOutputChain,
 		Rule:  knftables.Concat("ct state new", fmt.Sprintf("ip daddr @%s", nftablesAdvertisedUDNsSetV4), counterIfDebug, "drop"),
@@ -2471,5 +2509,150 @@ func configureAdvertisedUDNIsolationNFTables() error {
 		Chain: nftablesUDNBGPOutputChain,
 		Rule:  knftables.Concat("ct state new", fmt.Sprintf("ip6 daddr @%s", nftablesAdvertisedUDNsSetV6), counterIfDebug, "drop"),
 	})
+	return nft.Run(context.TODO(), tx)
+}
+
+// cncIsolationSetNames returns the v4 and v6 nftables set names that hold the
+// connected subnets of a single CNC. The names embed an 8-hex prefix of the
+// sha256 of the CNC name so they stay within nft identifier limits regardless of
+// the CNC name, and share that prefix with util.GetCNCParentVRFName's hashed form
+// so operators can correlate a set with the CNC's parent VRF.
+func cncIsolationSetNames(cncName string) (v4, v6 string) {
+	h := sha256.Sum256([]byte(cncName))
+	id := hex.EncodeToString(h[:])[:8]
+	return fmt.Sprintf("cnc-%s-subnets-v4", id), fmt.Sprintf("cnc-%s-subnets-v6", id)
+}
+
+// isCNCIsolationSetName reports whether name is one of the per-CNC subnet sets
+// managed by ReconcileCNCIsolationExemptions (as opposed to the advertised-udn
+// sets or any unrelated set in the table).
+func isCNCIsolationSetName(name string) bool {
+	return strings.HasPrefix(name, "cnc-") &&
+		(strings.HasSuffix(name, "-subnets-v4") || strings.HasSuffix(name, "-subnets-v6"))
+}
+
+// ReconcileCNCIsolationExemptions programs the udn-cnc-allow chain and its
+// per-CNC subnet sets so that inter-UDN pod traffic between the networks joined
+// by a given ClusterNetworkConnect (CNC) is exempted from udn-bgp-drop.
+//
+// cncSubnets maps a CNC name to the pod subnets of every network it connects.
+// For each CNC a dedicated pair of sets (cnc-<id>-subnets-v[4|6]) is populated,
+// and an accept rule pair is installed in udn-cnc-allow that accepts traffic only
+// when BOTH its source and destination fall in the SAME CNC's set. Keeping a set
+// per CNC means one CNC can never open a path between networks connected by a
+// different CNC, and requiring both ends to be connected keeps genuinely
+// host-originated traffic (never sourced from a UDN subnet) blocked.
+//
+// Sets and rules for CNCs absent from cncSubnets are removed, so calling this
+// with an empty map tears the exemptions down.
+func ReconcileCNCIsolationExemptions(cncSubnets map[string][]*net.IPNet) error {
+	counterIfDebug := ""
+	if config.Logging.Level > 4 {
+		counterIfDebug = "counter"
+	}
+
+	nft, err := nodenft.GetNFTablesHelper()
+	if err != nil {
+		return err
+	}
+
+	type cncSets struct {
+		v4Name, v6Name string
+		v4, v6         []*net.IPNet
+	}
+	desired := make(map[string]cncSets, len(cncSubnets))
+	desiredSetNames := sets.New[string]()
+	for cncName, subnets := range cncSubnets {
+		v4Name, v6Name := cncIsolationSetNames(cncName)
+		cs := cncSets{v4Name: v4Name, v6Name: v6Name}
+		for _, subnet := range subnets {
+			if subnet == nil {
+				continue
+			}
+			if utilnet.IsIPv6CIDR(subnet) {
+				cs.v6 = append(cs.v6, subnet)
+			} else {
+				cs.v4 = append(cs.v4, subnet)
+			}
+		}
+		desired[cncName] = cs
+		desiredSetNames.Insert(v4Name, v6Name)
+	}
+
+	// Existing per-CNC sets, so we can prune the stale ones below.
+	existingSets, err := nft.List(context.TODO(), "sets")
+	if err != nil && !knftables.IsNotFound(err) {
+		return fmt.Errorf("could not list nftables sets: %w", err)
+	}
+
+	tx := nft.NewTransaction()
+
+	// Ensure the allow chain exists and rebuild it from scratch so the generated
+	// ruleset is deterministic and stale rules never linger.
+	tx.Add(&knftables.Chain{Name: nftablesUDNCNCAllowChain})
+	tx.Flush(&knftables.Chain{Name: nftablesUDNCNCAllowChain})
+
+	cncNames := make([]string, 0, len(desired))
+	for cncName := range desired {
+		cncNames = append(cncNames, cncName)
+	}
+	sort.Strings(cncNames)
+
+	for _, cncName := range cncNames {
+		cs := desired[cncName]
+
+		v4Set := &knftables.Set{
+			Name:    cs.v4Name,
+			Comment: knftables.PtrTo(fmt.Sprintf("CNC %s connected V4 subnets", cncName)),
+			Type:    "ipv4_addr",
+			Flags:   []knftables.SetFlag{knftables.IntervalFlag},
+		}
+		tx.Add(v4Set)
+		tx.Flush(v4Set)
+		for _, subnet := range cs.v4 {
+			tx.Add(&knftables.Element{Set: cs.v4Name, Key: []string{subnet.String()}})
+		}
+
+		v6Set := &knftables.Set{
+			Name:    cs.v6Name,
+			Comment: knftables.PtrTo(fmt.Sprintf("CNC %s connected V6 subnets", cncName)),
+			Type:    "ipv6_addr",
+			Flags:   []knftables.SetFlag{knftables.IntervalFlag},
+		}
+		tx.Add(v6Set)
+		tx.Flush(v6Set)
+		for _, subnet := range cs.v6 {
+			tx.Add(&knftables.Element{Set: cs.v6Name, Key: []string{subnet.String()}})
+		}
+
+		if len(cs.v4) > 0 {
+			tx.Add(&knftables.Rule{
+				Chain: nftablesUDNCNCAllowChain,
+				Rule: knftables.Concat("ct state new",
+					fmt.Sprintf("ip saddr @%s", cs.v4Name),
+					fmt.Sprintf("ip daddr @%s", cs.v4Name), counterIfDebug, "accept"),
+				Comment: knftables.PtrTo(cncName),
+			})
+		}
+		if len(cs.v6) > 0 {
+			tx.Add(&knftables.Rule{
+				Chain: nftablesUDNCNCAllowChain,
+				Rule: knftables.Concat("ct state new",
+					fmt.Sprintf("ip6 saddr @%s", cs.v6Name),
+					fmt.Sprintf("ip6 daddr @%s", cs.v6Name), counterIfDebug, "accept"),
+				Comment: knftables.PtrTo(cncName),
+			})
+		}
+	}
+
+	// Prune per-CNC sets that no longer have a desired counterpart. The allow
+	// chain was flushed above, so nothing references them anymore.
+	for _, name := range existingSets {
+		if !isCNCIsolationSetName(name) || desiredSetNames.Has(name) {
+			continue
+		}
+		tx.Delete(&knftables.Set{Name: name})
+	}
+
 	return nft.Run(context.TODO(), tx)
 }

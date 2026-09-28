@@ -3784,6 +3784,86 @@ func TestUserDefinedNetworkGateway_updateAdvertisedUDNIsolationRules(t *testing.
 	}
 }
 
+func TestConfigureAdvertisedUDNIsolationNFTables(t *testing.T) {
+	g := NewWithT(t)
+	nft := nodenft.SetFakeNFTablesHelper()
+
+	g.Expect(configureAdvertisedUDNIsolationNFTables()).To(Succeed())
+
+	dump := nft.Dump()
+
+	// The dynamically-managed CNC allow chain must exist and be jumped to from
+	// udn-bgp-drop before the advertised-subnet drops, otherwise CNC-connected
+	// inter-UDN pod traffic would be dropped on the output hook.
+	g.Expect(dump).To(ContainSubstring("chain inet ovn-kubernetes udn-cnc-allow"))
+	jump := strings.Index(dump, "jump udn-cnc-allow")
+	dropV4 := strings.Index(dump, "ip daddr @advertised-udn-subnets-v4")
+	dropV6 := strings.Index(dump, "ip6 daddr @advertised-udn-subnets-v6")
+	g.Expect(jump).To(BeNumerically(">=", 0), "expected jump to udn-cnc-allow")
+	g.Expect(dropV4).To(BeNumerically(">", jump), "v4 drop must come after the jump")
+	g.Expect(dropV6).To(BeNumerically(">", jump), "v6 drop must come after the jump")
+}
+
+func TestReconcileCNCIsolationExemptions(t *testing.T) {
+	g := NewWithT(t)
+	nft := nodenft.SetFakeNFTablesHelper()
+
+	// The udn-cnc-allow chain must exist before per-CNC rules can be added to it.
+	g.Expect(configureAdvertisedUDNIsolationNFTables()).To(Succeed())
+
+	const cncA = "connect-ab"
+	const cncB = "connect-cd"
+	aV4, aV6 := cncIsolationSetNames(cncA)
+	bV4, _ := cncIsolationSetNames(cncB)
+
+	// Program two CNCs, each connecting a disjoint set of UDN subnets.
+	g.Expect(ReconcileCNCIsolationExemptions(map[string][]*net.IPNet{
+		cncA: {
+			ovntest.MustParseIPNet("10.10.0.0/16"),
+			ovntest.MustParseIPNet("10.20.0.0/16"),
+			ovntest.MustParseIPNet("2001:db8:a::/64"),
+		},
+		cncB: {
+			ovntest.MustParseIPNet("10.30.0.0/16"),
+		},
+	})).To(Succeed())
+
+	dump := nft.Dump()
+
+	// Per-CNC sets are created and populated.
+	g.Expect(dump).To(ContainSubstring("set inet ovn-kubernetes " + aV4))
+	g.Expect(dump).To(ContainSubstring("set inet ovn-kubernetes " + aV6))
+	g.Expect(dump).To(ContainSubstring("set inet ovn-kubernetes " + bV4))
+	g.Expect(dump).To(ContainSubstring("10.10.0.0/16"))
+	g.Expect(dump).To(ContainSubstring("10.20.0.0/16"))
+	g.Expect(dump).To(ContainSubstring("10.30.0.0/16"))
+
+	// Each accept rule matches the SAME CNC set on both saddr and daddr, so one
+	// CNC can never open a path to a subnet connected by a different CNC.
+	g.Expect(dump).To(ContainSubstring(fmt.Sprintf("ip saddr @%s ip daddr @%s", aV4, aV4)))
+	g.Expect(dump).To(ContainSubstring(fmt.Sprintf("ip6 saddr @%s ip6 daddr @%s", aV6, aV6)))
+	g.Expect(dump).To(ContainSubstring(fmt.Sprintf("ip saddr @%s ip daddr @%s", bV4, bV4)))
+	// No cross-CNC rule mixing CNC A's and CNC B's sets.
+	g.Expect(dump).NotTo(ContainSubstring(fmt.Sprintf("ip saddr @%s ip daddr @%s", aV4, bV4)))
+
+	// Dropping cncB from the desired set prunes its sets and rule while leaving
+	// cncA intact.
+	g.Expect(ReconcileCNCIsolationExemptions(map[string][]*net.IPNet{
+		cncA: {ovntest.MustParseIPNet("10.10.0.0/16")},
+	})).To(Succeed())
+	dump = nft.Dump()
+	g.Expect(dump).To(ContainSubstring("set inet ovn-kubernetes " + aV4))
+	g.Expect(dump).NotTo(ContainSubstring(bV4))
+	g.Expect(dump).NotTo(ContainSubstring("10.30.0.0/16"))
+
+	// Reconciling with an empty map tears all per-CNC exemptions down but leaves
+	// the base chains intact.
+	g.Expect(ReconcileCNCIsolationExemptions(nil)).To(Succeed())
+	dump = nft.Dump()
+	g.Expect(dump).To(ContainSubstring("chain inet ovn-kubernetes udn-cnc-allow"))
+	g.Expect(dump).NotTo(ContainSubstring(aV4))
+}
+
 func TestAddUDNMasqIPNeighbors(t *testing.T) {
 	bridgeName := "breth0"
 	linkIndex := 7
