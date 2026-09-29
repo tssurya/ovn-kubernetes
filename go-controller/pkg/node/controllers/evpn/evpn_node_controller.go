@@ -938,6 +938,14 @@ func (c *Controller) reconcileCNCParentVRFs(bridgeName string, configs []*cncPar
 // inter-UDN lookup and forwards to the correct child, implementing hub-and-spoke
 // routing without every child importing every other child's routes.
 //
+// For MAC-VRF-only (Layer2) connected networks, whose IP-VRF is the parent, it also
+// programs the reverse leg: a route in the parent VRF table that reinjects the
+// network's own local subnet into the network's child VRF. Such networks have no
+// BGP IP-VRF instance to originate their subnet into the parent, so without this
+// the hub blackholes their local pods (and cannot deliver VXLAN-decapped inter-UDN
+// traffic to them). Both legs share the readiness/carry-forward/staleness handling
+// below.
+//
 // Each connected network's pod subnets come from its CUDN spec (NetInfo.Subnets),
 // not the connect-subnet annotation, which is only populated for Geneve-transport
 // CNCs. For every local network N connected by the CNC we install, in N's VRF table,
@@ -995,13 +1003,27 @@ func (c *Controller) reconcileCNCSiblingRoutes(vtepName string) error {
 		type cncNet struct {
 			networkID int
 			owner     string
+			// l2Only is true when the network has no IP-VRF of its own and the CNC
+			// parent VRF acts as its IP-VRF (a MAC-VRF-only CUDN connected by the CNC).
+			// Such a network does not originate its local subnet into the parent via
+			// FRR (it has no BGP IP-VRF instance), so the parent hub cannot resolve the
+			// network's local pods without an explicit reinject route (see below).
+			l2Only bool
+			// childVRF is the network's own VRF device name; the parent hub route for an
+			// l2Only network reinjects the local subnet into it.
+			childVRF string
 		}
 		var nets []cncNet
 		ownerSubnets := make(map[string][]*net.IPNet)
 		pending, err := c.forEachCNCEVPNNetwork(cnc, vtepName, func(network util.NetInfo) bool {
 			networkID := network.GetNetworkID()
 			owner := util.ComputeNetworkOwner(network.TopologyType(), networkID)
-			nets = append(nets, cncNet{networkID: networkID, owner: owner})
+			nets = append(nets, cncNet{
+				networkID: networkID,
+				owner:     owner,
+				l2Only:    network.EVPNIPVRFVID() == 0,
+				childVRF:  util.GetNetworkVRFName(network),
+			})
 			for _, entry := range network.Subnets() {
 				if entry.CIDR != nil {
 					ownerSubnets[owner] = append(ownerSubnets[owner], entry.CIDR)
@@ -1024,6 +1046,14 @@ func (c *Controller) reconcileCNCSiblingRoutes(vtepName string) error {
 			notReady.Insert(cnc.Name)
 			continue
 		}
+
+		// The parent hub routes (for MAC-VRF-only networks) are programmed into the
+		// parent VRF's own routing table; read it from the parent VRF device.
+		parentVRF, ok := parentLink.(*netlink.Vrf)
+		if !ok {
+			return fmt.Errorf("CNC %s parent %s is not a VRF device", cnc.Name, parentVRFName)
+		}
+		parentTable := int(parentVRF.Table)
 
 		// Program, in each local network's VRF table, a route to every sibling
 		// network's subnet via the parent VRF. Accumulate this CNC's routes
@@ -1065,6 +1095,35 @@ func (c *Controller) reconcileCNCSiblingRoutes(vtepName string) error {
 						Protocol:  netlink.RouteProtocol(types.OVNKProtocol),
 					}
 					cncRoutes[siblingRouteKey{dst: subnet.String(), table: tableID}] = siblingRouteEntry{route: route, cnc: cnc.Name}
+				}
+			}
+
+			// A MAC-VRF-only network's IP-VRF is the parent, and it does not originate
+			// its local subnet into the parent via FRR (no BGP IP-VRF instance of its
+			// own). Without this route the hub blackholes the network's local pods and
+			// cannot deliver VXLAN-decapped inter-UDN traffic to them. Program, in the
+			// parent VRF table, a reinject route for this network's own subnet into its
+			// child VRF, which resolves the pod via the management port. Remote pods are
+			// unaffected: symmetric IRB installs more-specific /32 routes in the parent.
+			if n.l2Only {
+				childVRFLink, err := util.GetNetLinkOps().LinkByName(n.childVRF)
+				if err != nil {
+					var linkNotFound netlink.LinkNotFoundError
+					if errors.As(err, &linkNotFound) {
+						cncNotReady = true
+						break
+					}
+					return fmt.Errorf("failed to resolve network %d child VRF %s: %w", n.networkID, n.childVRF, err)
+				}
+				for _, subnet := range ownerSubnets[n.owner] {
+					route := netlink.Route{
+						Dst:       subnet,
+						Table:     parentTable,
+						LinkIndex: childVRFLink.Attrs().Index,
+						Priority:  cncSiblingRouteMetric,
+						Protocol:  netlink.RouteProtocol(types.OVNKProtocol),
+					}
+					cncRoutes[siblingRouteKey{dst: subnet.String(), table: parentTable}] = siblingRouteEntry{route: route, cnc: cnc.Name}
 				}
 			}
 		}
