@@ -74,11 +74,23 @@ const DefaultEphemeralPortRange = "32768-60999"
 // MinimumRoutingTableIDStart is the lowest allowed start of OVN-managed Linux route table IDs.
 const MinimumRoutingTableIDStart = 1000
 
-// MaximumRoutingTableIDStart is capped so adding any Linux interface index still fits in a uint32 route table ID.
-const MaximumRoutingTableIDStart = 1<<31 - 1
+// MaximumRoutingTableIDStart is capped below EVPNCNCRoutingTableIDStart so the general
+// OVN-managed range (RoutingTableIDStart + ifIndex) can never overlap the range reserved for
+// EVPN CNC parent VRFs, and so adding any Linux interface index still fits in a uint32 route
+// table ID.
+const MaximumRoutingTableIDStart = EVPNCNCRoutingTableIDStart - 1
 
 // DefaultRoutingTableIDStart is the default start of OVN-managed Linux route table IDs.
 const DefaultRoutingTableIDStart = MinimumRoutingTableIDStart
+
+// EVPNCNCRoutingTableIDStart is the base Linux routing table ID for EVPN CNC parent VRFs
+// (their table IDs are EVPNCNCRoutingTableIDStart + VID). These VRF devices are owned by the
+// EVPN node controller through the netlink device manager, not by the VRF manager, so the VRF
+// manager's stale-VRF repair must leave them alone. Reserving a dedicated range above the
+// general OVN-managed range (RoutingTableIDStart + ifIndex) keeps the two owners disjoint
+// without any cross-component coordination. Kept below MaximumRoutingTableIDStart so
+// RoutingTableIDStart validation still forbids overlap with this reserved range.
+const EVPNCNCRoutingTableIDStart = 1000000
 
 // The following are global config parameters that other modules may access directly
 var (

@@ -693,6 +693,25 @@ var _ = ginkgo.Describe("VRF manager", func() {
 			err := c.Repair(validVRFs)
 			gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
 		})
+
+		ginkgo.It("does not repair EVPN CNC parent VRFs in the reserved table range", func() {
+			// EVPN CNC parent VRFs are owned by the EVPN node controller via the
+			// netlink device manager, not by us. Their table IDs sit in a reserved
+			// range at/above config.EVPNCNCRoutingTableIDStart, so repair must leave
+			// them alone even when they are absent from the valid set - reaping them
+			// would churn the VRF ifindex and break routes pinned to it.
+			cncVRF := &netlink.Vrf{
+				LinkAttrs: netlink.LinkAttrs{Name: "cnc.f61ee1a4", Index: 100},
+				Table:     uint32(config.EVPNCNCRoutingTableIDStart) + 4,
+			}
+			nlMock.On("LinkList").Return([]netlink.Link{buildVRF(vrfLinkName2), cncVRF}, nil)
+
+			// An empty valid set: only the reserved-range VRF must survive.
+			err := c.Repair(sets.New[string]())
+			gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+			nlMock.AssertNotCalled(ginkgo.GinkgoT(), "LinkDelete", cncVRF)
+			nlMock.AssertCalled(ginkgo.GinkgoT(), "LinkDelete", buildVRF(vrfLinkName2))
+		})
 	})
 })
 

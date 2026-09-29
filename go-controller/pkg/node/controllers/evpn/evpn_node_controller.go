@@ -82,8 +82,9 @@ const (
 	// cncParentVRFTableBase is the Linux routing table ID base for CNC parent VRFs.
 	// CNC parent VRF table IDs = cncParentVRFTableBase + VID (VID is 1-4094, table IDs 1000001-1004094).
 	// This range is safely above regular CUDN VRF tables (RoutingTableIDStart + ifIndex, practically ≤ ~66000)
-	// and DPU VRF tables (100000 + networkID, practically ≤ ~110000).
-	cncParentVRFTableBase = 1000000
+	// and DPU VRF tables (100000 + networkID, practically ≤ ~110000). It is reserved in config so the VRF
+	// manager's stale-VRF repair leaves these NDM-owned VRFs alone (see config.EVPNCNCRoutingTableIDStart).
+	cncParentVRFTableBase = config.EVPNCNCRoutingTableIDStart
 
 	// cncSiblingRouteMetric is the priority of the child-VRF routes that steer
 	// inter-UDN egress toward the CNC parent VRF. A low, non-zero metric keeps

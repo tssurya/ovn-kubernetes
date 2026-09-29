@@ -498,6 +498,13 @@ func (vrfm *Controller) repair(validVRFs sets.Set[string]) error {
 			// vrf device not managed by us
 			continue
 		}
+		if vrf.Table >= uint32(config.EVPNCNCRoutingTableIDStart) {
+			// EVPN CNC parent VRFs live in a reserved table range and are owned by the
+			// EVPN node controller through the netlink device manager, not by us. Reaping
+			// them here would delete a device another controller keeps recreating, churning
+			// its ifindex and invalidating routes pinned to it.
+			continue
+		}
 		name := vrf.Name
 		if validVRFs.Has(name) {
 			// vrf not stale
