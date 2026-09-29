@@ -442,6 +442,17 @@ func (c *Controller) reconcile(key string) error {
 		return err
 	}
 
+	// Refresh the node-global CNC isolation exemptions here as well as from the CNC
+	// controller: a network connected by a CNC may only become resolvable (its NetInfo
+	// registered) after the CNC event has already been processed, and its readiness
+	// drives a VTEP reconcile via the NAD reconciler rather than a CNC event. Recomputing
+	// on the VTEP path folds those late-joining networks into the exemption sets.
+	if c.cncLister != nil {
+		if err := c.reconcileCNCIsolationExemptions(); err != nil {
+			return fmt.Errorf("failed to reconcile CNC isolation exemptions for VTEP %s: %w", vtep.Name, err)
+		}
+	}
+
 	if err := c.reconcileOVSPorts(vtep.Name, GetEVPNBridgeName(vtep.Name), networks); err != nil {
 		var linkNotFound netlink.LinkNotFoundError
 		if errors.As(err, &linkNotFound) {
@@ -572,23 +583,25 @@ type cncParentVRFInfo struct {
 }
 
 // cncNodeNeedsUpdate returns true when a CNC change is relevant to the node EVPN controller.
-// Watches for spec changes (networkSelectors may change which VTEP is selected), VID
-// allocation (the readiness signal that triggers SVI creation), and connect-subnet
-// annotation changes (which drive the udn-bgp-drop isolation exemptions).
+// Watches for spec changes (networkSelectors may change which networks/VTEPs are selected,
+// which drives both the parent VRF import set and the isolation exemptions) and VID
+// allocation (the readiness signal that triggers SVI creation). The connect-subnet
+// annotation is not watched: it is only populated for Geneve-transport CNCs, so EVPN
+// connected subnets come from each network's CUDN spec instead.
 func cncNodeNeedsUpdate(oldObj, newObj *networkconnectv1.ClusterNetworkConnect) bool {
 	if oldObj == nil || newObj == nil {
 		return true
 	}
 	return oldObj.Generation != newObj.Generation ||
-		oldObj.Annotations[util.OvnCNCEVPNParentVRFVIDAnnotation] != newObj.Annotations[util.OvnCNCEVPNParentVRFVIDAnnotation] ||
-		util.NetworkConnectSubnetAnnotationChanged(oldObj, newObj)
+		oldObj.Annotations[util.OvnCNCEVPNParentVRFVIDAnnotation] != newObj.Annotations[util.OvnCNCEVPNParentVRFVIDAnnotation]
 }
 
 // collectCNCConnectedSubnets returns, per EVPN CNC, the pod subnets of every
-// network the CNC connects, read from the connect-subnet annotation that the
-// clustermanager populates. Non-EVPN CNCs are skipped: their inter-UDN traffic
-// stays inside OVN and is never re-injected through the host output hook, so it
-// does not hit udn-bgp-drop.
+// network the CNC connects, read from each connected network's CUDN spec
+// (NetInfo.Subnets). EVPN CNCs do not use the connect-subnet annotation, which is
+// only populated for Geneve-transport CNCs. Non-EVPN CNCs are skipped: their
+// inter-UDN traffic stays inside OVN and is never re-injected through the host
+// output hook, so it does not hit the udn drop chains.
 func (c *Controller) collectCNCConnectedSubnets() (map[string][]*net.IPNet, error) {
 	if c.cncLister == nil {
 		return nil, nil
@@ -602,14 +615,19 @@ func (c *Controller) collectCNCConnectedSubnets() (map[string][]*net.IPNet, erro
 		if cnc.Spec.EVPNConfiguration == nil {
 			continue
 		}
-		perNetwork, err := util.ParseNetworkConnectSubnetAnnotation(cnc)
-		if err != nil {
-			klog.Warningf("CNC %s: invalid connect-subnet annotation, skipping isolation exemption: %v", cnc.Name, err)
-			continue
-		}
 		var subnets []*net.IPNet
-		for _, networkSubnets := range perNetwork {
-			subnets = append(subnets, networkSubnets...)
+		// vtepName is empty: exemptions are node-global, so gather subnets from every
+		// EVPN network the CNC connects regardless of which VTEP it uses.
+		err := c.forEachCNCEVPNNetwork(cnc, "", func(network util.NetInfo) bool {
+			for _, entry := range network.Subnets() {
+				if entry.CIDR != nil {
+					subnets = append(subnets, entry.CIDR)
+				}
+			}
+			return true
+		})
+		if err != nil {
+			return nil, fmt.Errorf("failed to resolve CNC %s connected networks: %w", cnc.Name, err)
 		}
 		if len(subnets) == 0 {
 			continue
@@ -683,30 +701,53 @@ func (c *Controller) collectCNCParentVRFConfigs(vtepName string) ([]*cncParentVR
 // It resolves the CNC's networkSelectors using the local NAD and namespace listers,
 // then checks EVPNVTEPName() against vtepName via the networkManager.
 func (c *Controller) cncUsesVTEP(cnc *networkconnectv1.ClusterNetworkConnect, vtepName string) (bool, error) {
+	var uses bool
+	err := c.forEachCNCEVPNNetwork(cnc, vtepName, func(util.NetInfo) bool {
+		uses = true
+		return false // stop at the first match
+	})
+	return uses, err
+}
+
+// forEachCNCEVPNNetwork resolves the CNC's ClusterUserDefinedNetworks selectors to
+// EVPN networks using the local NAD lister and networkManager, and invokes fn for
+// each EVPN network. When vtepName is non-empty, only networks using that VTEP are
+// visited; when empty, every EVPN network the CNC connects is visited (used by the
+// node-global isolation-exemption reconcile). fn returns false to stop iteration
+// early. PrimaryUserDefinedNetworks selectors are ignored: namespace-scoped UDNs do
+// not support EVPN transport.
+func (c *Controller) forEachCNCEVPNNetwork(cnc *networkconnectv1.ClusterNetworkConnect, vtepName string, fn func(util.NetInfo) bool) error {
 	for _, selector := range cnc.Spec.NetworkSelectors {
-		switch selector.NetworkSelectionType {
-		case apitypes.ClusterUserDefinedNetworks:
-			networkSelector, err := metav1.LabelSelectorAsSelector(&selector.ClusterUserDefinedNetworkSelector.NetworkSelector)
-			if err != nil {
-				return false, fmt.Errorf("failed to parse CUDN selector: %w", err)
+		if selector.NetworkSelectionType != apitypes.ClusterUserDefinedNetworks {
+			continue
+		}
+		networkSelector, err := metav1.LabelSelectorAsSelector(&selector.ClusterUserDefinedNetworkSelector.NetworkSelector)
+		if err != nil {
+			return fmt.Errorf("failed to parse CUDN selector: %w", err)
+		}
+		nads, err := c.nadLister.List(networkSelector)
+		if err != nil {
+			return fmt.Errorf("failed to list NADs: %w", err)
+		}
+		for _, nad := range nads {
+			owner := metav1.GetControllerOfNoCopy(nad)
+			if owner == nil || owner.Kind != cudnGVK.Kind || owner.APIVersion != cudnGVK.GroupVersion().String() {
+				continue
 			}
-			nads, err := c.nadLister.List(networkSelector)
-			if err != nil {
-				return false, fmt.Errorf("failed to list NADs: %w", err)
+			network := c.networkMgr.GetNetInfoForNADKey(nad.Namespace + "/" + nad.Name)
+			if network == nil || network.EVPNVTEPName() == "" {
+				// Not an EVPN network.
+				continue
 			}
-			for _, nad := range nads {
-				owner := metav1.GetControllerOfNoCopy(nad)
-				if owner == nil || owner.Kind != cudnGVK.Kind || owner.APIVersion != cudnGVK.GroupVersion().String() {
-					continue
-				}
-				network := c.networkMgr.GetNetInfoForNADKey(nad.Namespace + "/" + nad.Name)
-				if network != nil && network.EVPNVTEPName() == vtepName {
-					return true, nil
-				}
+			if vtepName != "" && network.EVPNVTEPName() != vtepName {
+				continue
+			}
+			if !fn(network) {
+				return nil
 			}
 		}
 	}
-	return false, nil
+	return nil
 }
 
 // reconcileCNCParentVRFs ensures the desired CNC parent VRF devices and SVIs exist
