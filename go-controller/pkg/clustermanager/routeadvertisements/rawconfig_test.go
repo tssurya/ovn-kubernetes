@@ -468,7 +468,7 @@ exit
 	}
 }
 
-func TestGenCNCIPVRFChildImportSection(t *testing.T) {
+func TestGenCNCIPVRFChildSection(t *testing.T) {
 	tests := []struct {
 		name          string
 		childVRFName  string
@@ -496,15 +496,7 @@ func TestGenCNCIPVRFChildImportSection(t *testing.T) {
 route-map CNC-BLUE-UDN-VRF-ADVERTISE permit 10
  match ip address prefix-list CNC-BLUE-UDN-VRF-PREFIXES
 !
-route-map CNC-BLUE-UDN-VRF-IMPORT deny 10
- match ip address prefix-list CNC-BLUE-UDN-VRF-PREFIXES
-route-map CNC-BLUE-UDN-VRF-IMPORT permit 20
-!
 router bgp 65000 vrf blue-udn-vrf
- address-family ipv4 unicast
-  import vrf route-map CNC-BLUE-UDN-VRF-IMPORT
-  import vrf cnc-tenant-vrf
- exit-address-family
  address-family l2vpn evpn
   advertise ipv4 unicast route-map CNC-BLUE-UDN-VRF-ADVERTISE
  exit-address-family
@@ -527,15 +519,7 @@ ip prefix-list CNC-BLUE-UDN-VRF-PREFIXES seq 20 permit 10.2.0.0/24 le 32
 route-map CNC-BLUE-UDN-VRF-ADVERTISE permit 10
  match ip address prefix-list CNC-BLUE-UDN-VRF-PREFIXES
 !
-route-map CNC-BLUE-UDN-VRF-IMPORT deny 10
- match ip address prefix-list CNC-BLUE-UDN-VRF-PREFIXES
-route-map CNC-BLUE-UDN-VRF-IMPORT permit 20
-!
 router bgp 65000 vrf blue-udn-vrf
- address-family ipv4 unicast
-  import vrf route-map CNC-BLUE-UDN-VRF-IMPORT
-  import vrf cnc-tenant-vrf
- exit-address-family
  address-family l2vpn evpn
   advertise ipv4 unicast route-map CNC-BLUE-UDN-VRF-ADVERTISE
  exit-address-family
@@ -544,17 +528,14 @@ exit
 `,
 		},
 		{
-			name:          "IP-VRF child with no subnets — no import route-map, bare import vrf",
+			name:          "IP-VRF child with no subnets — bare advertise, no route-map",
 			childVRFName:  "blue-udn-vrf",
 			parentVRFName: "cnc-tenant-vrf",
 			asn:           65000,
 			childSubnets:  nil,
 			want: `router bgp 65000 vrf blue-udn-vrf
- address-family ipv4 unicast
-  import vrf cnc-tenant-vrf
- exit-address-family
  address-family l2vpn evpn
-  advertise ipv4 unicast route-map CNC-BLUE-UDN-VRF-ADVERTISE
+  advertise ipv4 unicast
  exit-address-family
 exit
 !
@@ -563,9 +544,9 @@ exit
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := genCNCIPVRFChildImportSection(tt.childVRFName, tt.parentVRFName, tt.asn, tt.childSubnets)
+			got := genCNCIPVRFChildSection(tt.childVRFName, tt.parentVRFName, tt.asn, tt.childSubnets)
 			if got != tt.want {
-				t.Errorf("genCNCIPVRFChildImportSection() mismatch\nGot:\n%s\nWant:\n%s", got, tt.want)
+				t.Errorf("genCNCIPVRFChildSection() mismatch\nGot:\n%s\nWant:\n%s", got, tt.want)
 			}
 		})
 	}
@@ -589,29 +570,21 @@ func TestGenCNCMACVRFChildSection(t *testing.T) {
 			want:          "",
 		},
 		{
-			// MAC-VRF (Layer2) child: HostSubnetLength is 0, but the child's own
-			// feedback-loop deny still caps at le 32 (deny of its own space and any
-			// more-specific), independent of the parent prefix-list cap.
-			name:          "Layer2 MAC-VRF child with one subnet keeps le 32 deny",
+			// MAC-VRF (Layer2) child: the CNC parent VRF acts as its IP-VRF. The child
+			// only redistributes connected routes and advertises them; it does not
+			// "import vrf <parent>" (that would leak the parent's sibling routes via the
+			// overlay next-hop). childSubnets is unused here and does not affect output.
+			name:          "Layer2 MAC-VRF child only redistributes connected, no import vrf",
 			childVRFName:  "beta-udn-vrf",
 			parentVRFName: "cnc-tenant-vrf",
 			asn:           65000,
 			childSubnets:  []cncSubnet{{CIDR: mustParseCIDR("10.20.0.0/16"), HostSubnetLength: 0}},
-			want: `ip prefix-list CNC-BETA-UDN-VRF-PREFIXES seq 10 permit 10.20.0.0/16 le 32
-!
-route-map CNC-BETA-UDN-VRF-IMPORT deny 10
- match ip address prefix-list CNC-BETA-UDN-VRF-PREFIXES
-route-map CNC-BETA-UDN-VRF-IMPORT permit 20
-!
-router bgp 65000 vrf beta-udn-vrf
+			want: `router bgp 65000 vrf beta-udn-vrf
  address-family ipv4 unicast
   redistribute connected
-  import vrf route-map CNC-BETA-UDN-VRF-IMPORT
-  import vrf cnc-tenant-vrf
  exit-address-family
  address-family ipv6 unicast
   redistribute connected
-  import vrf cnc-tenant-vrf
  exit-address-family
  address-family l2vpn evpn
   advertise ipv4 unicast

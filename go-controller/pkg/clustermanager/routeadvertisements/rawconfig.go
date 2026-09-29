@@ -149,7 +149,7 @@ func generateRawConfig(selected *selectedNetworks, vrfNeighbors map[string][]str
 		}
 		buf.WriteString(genCNCParentVRFSection(cncCfg.ParentVRFName, globalASN, cncCfg.ParentVNI, cncCfg.ChildVRFNames, allChildSubnets))
 		for _, child := range cncCfg.IPVRFChildren {
-			buf.WriteString(genCNCIPVRFChildImportSection(child.VRFName, cncCfg.ParentVRFName, globalASN, child.Subnets))
+			buf.WriteString(genCNCIPVRFChildSection(child.VRFName, cncCfg.ParentVRFName, globalASN, child.Subnets))
 		}
 		for _, child := range cncCfg.MACVRFOnlyChildren {
 			buf.WriteString(genCNCMACVRFChildSection(child.VRFName, cncCfg.ParentVRFName, globalASN, child.Subnets))
@@ -477,36 +477,25 @@ func genCNCParentVRFSection(parentVRFName string, asn uint32, l3VNI int32, child
 
 // genCNCMACVRFChildSection generates the raw FRR stanza for a MAC-VRF-only child
 // connected to a CNC parent VRF. MAC-VRF-only children have no dedicated IP-VRF VNI,
-// so the CNC parent VRF acts as their shared IP-VRF. This stanza:
-//   - redistributes connected routes into BGP so the parent can import and type-5-advertise them
-//   - imports routes from the parent VRF for cross-network reachability, filtered by an
-//     import route-map that blocks the child's own subnets from being re-installed via
-//     the parent feedback loop (same ECMP issue as IP-VRF children)
+// so the CNC parent VRF acts as their shared IP-VRF. This stanza only redistributes
+// connected routes into BGP so the parent can import and type-5-advertise them.
 //
-// Generated config structure (when childSubnets are provided):
+// The child deliberately does NOT "import vrf <parent>". Sibling reachability is
+// provided on the node by a static route that funnels each sibling subnet into the
+// parent VRF routing table, which holds the correct next-hops (local dev for
+// same-node subnets, L3VNI overlay for remote ones). Importing the parent here would
+// instead leak the parent's sibling /24s into the child table via the overlay
+// next-hop — blackholing same-node traffic and out-specifying the node's aggregate
+// override on longest-prefix-match.
 //
-//	ip prefix-list CNC-<CHILD>-PREFIXES seq 10 permit <v4subnet1>
-//	!
-//	route-map CNC-<CHILD>-IMPORT deny 10
-//	 match ip address prefix-list CNC-<CHILD>-PREFIXES
-//	route-map CNC-<CHILD>-IMPORT permit 20
-//	!
-//	ipv6 prefix-list CNC-<CHILD>-V6PREFIXES seq 10 permit <v6subnet1>
-//	!
-//	route-map CNC-<CHILD>-V6IMPORT deny 10
-//	 match ipv6 address prefix-list CNC-<CHILD>-V6PREFIXES
-//	route-map CNC-<CHILD>-V6IMPORT permit 20
-//	!
+// Generated config structure:
+//
 //	router bgp <asn> vrf <childVRFName>
 //	 address-family ipv4 unicast
 //	  redistribute connected
-//	  import vrf route-map CNC-<CHILD>-IMPORT <parentVRFName>
-//	  import vrf <parentVRFName>
 //	 exit-address-family
 //	 address-family ipv6 unicast
 //	  redistribute connected
-//	  import vrf route-map CNC-<CHILD>-V6IMPORT <parentVRFName>
-//	  import vrf <parentVRFName>
 //	 exit-address-family
 //	 address-family l2vpn evpn
 //	  advertise ipv4 unicast
@@ -519,67 +508,16 @@ func genCNCMACVRFChildSection(childVRFName, parentVRFName string, asn uint32, ch
 		return ""
 	}
 
-	base := strings.ToUpper(childVRFName)
-	v4PrefixList := "CNC-" + base + "-PREFIXES"
-	v4ImportMap := "CNC-" + base + "-IMPORT"
-	v6PrefixList := "CNC-" + base + "-V6PREFIXES"
-	v6ImportMap := "CNC-" + base + "-V6IMPORT"
-
-	// Separate subnets by IP family, sort for deterministic output.
-	var v4Subnets, v6Subnets []*net.IPNet
-	for _, subnet := range childSubnets {
-		if subnet.CIDR.IP.To4() != nil {
-			v4Subnets = append(v4Subnets, subnet.CIDR)
-		} else {
-			v6Subnets = append(v6Subnets, subnet.CIDR)
-		}
-	}
-	slices.SortFunc(v4Subnets, func(a, b *net.IPNet) int { return strings.Compare(a.String(), b.String()) })
-	slices.SortFunc(v6Subnets, func(a, b *net.IPNet) int { return strings.Compare(a.String(), b.String()) })
-
 	var buf strings.Builder
-
-	if len(v4Subnets) > 0 {
-		for i, subnet := range v4Subnets {
-			// le 32 here is a DENY of the child's OWN subnet (and any more-specific)
-			// coming back from the parent feedback loop — the child never needs its
-			// own address space re-imported, so capping at the aggregate is
-			// unnecessary and less robust. See the import route-map below.
-			fmt.Fprintf(&buf, "ip prefix-list %s seq %d permit %s le 32\n", v4PrefixList, (i+1)*10, subnet)
-		}
-		buf.WriteString("!\n")
-		fmt.Fprintf(&buf, "route-map %s deny 10\n", v4ImportMap)
-		fmt.Fprintf(&buf, " match ip address prefix-list %s\n", v4PrefixList)
-		fmt.Fprintf(&buf, "route-map %s permit 20\n", v4ImportMap)
-		buf.WriteString("!\n")
-	}
-	if len(v6Subnets) > 0 {
-		for i, subnet := range v6Subnets {
-			fmt.Fprintf(&buf, "ipv6 prefix-list %s seq %d permit %s le 128\n", v6PrefixList, (i+1)*10, subnet)
-		}
-		buf.WriteString("!\n")
-		fmt.Fprintf(&buf, "route-map %s deny 10\n", v6ImportMap)
-		fmt.Fprintf(&buf, " match ipv6 address prefix-list %s\n", v6PrefixList)
-		fmt.Fprintf(&buf, "route-map %s permit 20\n", v6ImportMap)
-		buf.WriteString("!\n")
-	}
 
 	fmt.Fprintf(&buf, "router bgp %d vrf %s\n", asn, childVRFName)
 
 	buf.WriteString(" address-family ipv4 unicast\n")
 	buf.WriteString("  redistribute connected\n")
-	if len(v4Subnets) > 0 {
-		fmt.Fprintf(&buf, "  import vrf route-map %s\n", v4ImportMap)
-	}
-	fmt.Fprintf(&buf, "  import vrf %s\n", parentVRFName)
 	buf.WriteString(" exit-address-family\n")
 
 	buf.WriteString(" address-family ipv6 unicast\n")
 	buf.WriteString("  redistribute connected\n")
-	if len(v6Subnets) > 0 {
-		fmt.Fprintf(&buf, "  import vrf route-map %s\n", v6ImportMap)
-	}
-	fmt.Fprintf(&buf, "  import vrf %s\n", parentVRFName)
 	buf.WriteString(" exit-address-family\n")
 
 	buf.WriteString(" address-family l2vpn evpn\n")
@@ -592,53 +530,49 @@ func genCNCMACVRFChildSection(childVRFName, parentVRFName string, asn uint32, ch
 	return buf.String()
 }
 
-// genCNCIPVRFChildImportSection generates the raw FRR stanza needed for an IP-VRF
-// child connected to a CNC parent VRF. It emits two route-maps:
+// genCNCIPVRFChildSection generates the raw FRR stanza needed for an IP-VRF
+// child connected to a CNC parent VRF. It emits one route-map:
 //
-//   - CNC-<CHILD>-ADVERTISE (permit 10): applied to "advertise ipv4 unicast" to prevent
-//     routes imported from the parent VRF from being re-advertised under the child's own
-//     route-target — there is no structured FRRConfiguration equivalent for this.
+//   - CNC-<CHILD>-ADVERTISE (permit 10): applied to "advertise ipv4 unicast" to restrict
+//     the child to type-5-advertising only its own subnets under its route-target — there
+//     is no structured FRRConfiguration equivalent for this.
 //
-//   - CNC-<CHILD>-IMPORT (deny 10, permit 20): applied to "import vrf route-map" to
-//     prevent the child's own subnets from being re-installed via the parent VRF feedback
-//     loop (parent imports child routes, re-advertises as type-5, child would otherwise
-//     re-import them creating ECMP against the type-2-derived /32 paths).
+// The child deliberately does NOT "import vrf <parent>". Sibling reachability is
+// provided on the node by a static route that funnels each sibling subnet into the
+// parent VRF routing table, which holds the correct next-hops (local dev for
+// same-node subnets, L3VNI overlay for remote ones). Importing the parent here would
+// instead leak the parent's sibling /24s into the child table via the overlay
+// next-hop — blackholing same-node traffic and out-specifying the node's aggregate
+// override on longest-prefix-match. Dropping the import also removes the parent
+// feedback loop, so no import route-map is needed to deny the child's own subnets.
 //
-//     ip prefix-list CNC-<CHILD>-PREFIXES seq 10 permit <subnet1>
-//     ip prefix-list CNC-<CHILD>-PREFIXES seq 20 permit <subnet2>
-//     !
-//     route-map CNC-<CHILD>-ADVERTISE permit 10
-//     match ip address prefix-list CNC-<CHILD>-PREFIXES
-//     !
-//     route-map CNC-<CHILD>-IMPORT deny 10
-//     match ip address prefix-list CNC-<CHILD>-PREFIXES
-//     route-map CNC-<CHILD>-IMPORT permit 20
-//     !
-//     router bgp <asn> vrf <childVRFName>
-//     address-family ipv4 unicast
-//     import vrf route-map CNC-<CHILD>-IMPORT <parentVRFName>
-//     exit-address-family
-//     address-family l2vpn evpn
-//     advertise ipv4 unicast route-map CNC-<CHILD>-ADVERTISE
-//     exit-address-family
-//     exit
-//     !
-func genCNCIPVRFChildImportSection(childVRFName, parentVRFName string, asn uint32, childSubnets []cncSubnet) string {
+//	ip prefix-list CNC-<CHILD>-PREFIXES seq 10 permit <subnet1>
+//	ip prefix-list CNC-<CHILD>-PREFIXES seq 20 permit <subnet2>
+//	!
+//	route-map CNC-<CHILD>-ADVERTISE permit 10
+//	match ip address prefix-list CNC-<CHILD>-PREFIXES
+//	!
+//	router bgp <asn> vrf <childVRFName>
+//	address-family l2vpn evpn
+//	advertise ipv4 unicast route-map CNC-<CHILD>-ADVERTISE
+//	exit-address-family
+//	exit
+//	!
+func genCNCIPVRFChildSection(childVRFName, parentVRFName string, asn uint32, childSubnets []cncSubnet) string {
 	if asn == 0 {
 		return ""
 	}
 
 	// childVRFName comes from GetNetworkVRFName which guarantees ≤15 chars,
-	// so "CNC-" + upper(childVRFName) + "-PREFIXES/ADVERTISE/IMPORT" fits within FRR's 63-char limit.
+	// so "CNC-" + upper(childVRFName) + "-PREFIXES/ADVERTISE" fits within FRR's 63-char limit.
 	base := strings.ToUpper(childVRFName)
 	prefixList := "CNC-" + base + "-PREFIXES"
 	advertiseMap := "CNC-" + base + "-ADVERTISE"
-	importMap := "CNC-" + base + "-IMPORT"
 
 	var buf strings.Builder
 
-	// Collect IPv4 subnets — the import route-map and advertise route-map both use
-	// the same prefix-list. Sorted for deterministic output.
+	// Collect IPv4 subnets for the advertise route-map's prefix-list. Sorted for
+	// deterministic output.
 	var v4Subnets []*net.IPNet
 	for _, subnet := range childSubnets {
 		if subnet.CIDR.IP.To4() != nil {
@@ -656,30 +590,20 @@ func genCNCIPVRFChildImportSection(childVRFName, parentVRFName string, asn uint3
 			fmt.Fprintf(&buf, "ip prefix-list %s seq %d permit %s le 32\n", prefixList, (i+1)*10, subnet)
 		}
 		buf.WriteString("!\n")
-		// Advertise route-map: permit own subnets only (blocks re-advertisement of
-		// routes imported from the parent back into EVPN under the child's RT).
+		// Advertise route-map: permit own subnets only.
 		fmt.Fprintf(&buf, "route-map %s permit 10\n", advertiseMap)
 		fmt.Fprintf(&buf, " match ip address prefix-list %s\n", prefixList)
-		buf.WriteString("!\n")
-		// Import route-map: deny own subnets (blocks feedback-loop re-import from
-		// parent), permit everything else (sibling routes from parent).
-		fmt.Fprintf(&buf, "route-map %s deny 10\n", importMap)
-		fmt.Fprintf(&buf, " match ip address prefix-list %s\n", prefixList)
-		fmt.Fprintf(&buf, "route-map %s permit 20\n", importMap)
 		buf.WriteString("!\n")
 	}
 
 	fmt.Fprintf(&buf, "router bgp %d vrf %s\n", asn, childVRFName)
 
-	buf.WriteString(" address-family ipv4 unicast\n")
-	if len(v4Subnets) > 0 {
-		fmt.Fprintf(&buf, "  import vrf route-map %s\n", importMap)
-	}
-	fmt.Fprintf(&buf, "  import vrf %s\n", parentVRFName)
-	buf.WriteString(" exit-address-family\n")
-
 	buf.WriteString(" address-family l2vpn evpn\n")
-	fmt.Fprintf(&buf, "  advertise ipv4 unicast route-map %s\n", advertiseMap)
+	if len(v4Subnets) > 0 {
+		fmt.Fprintf(&buf, "  advertise ipv4 unicast route-map %s\n", advertiseMap)
+	} else {
+		buf.WriteString("  advertise ipv4 unicast\n")
+	}
 	buf.WriteString(" exit-address-family\n")
 
 	buf.WriteString("exit\n!\n")
