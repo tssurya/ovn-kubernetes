@@ -197,6 +197,17 @@ type DeviceConfig struct {
 	// Architectural constraint (SVD model): a VID shared by two VXLAN devices
 	// on the same bridge is not supported and behavior is undefined.
 	VIDVNIMappings []VIDVNIMapping
+
+	// RPFilterLoose, when true, sets the device's IPv4 reverse-path filter to
+	// loose mode (net.ipv4.conf.<device>.rp_filter = 2) after the device is
+	// brought up, and re-applies it on every reconcile (including after a
+	// delete+recreate). This is required for EVPN SVIs that carry asymmetric
+	// cross-VRF forwarded traffic, where the reverse route resolves via a
+	// different interface than the one the packet ingressed on and strict RPF
+	// would drop it. It is a no-op for IPv6 (which has no strict rp_filter mode).
+	// Because reconciliation always runs after the device exists in the kernel,
+	// this is race-free with respect to asynchronous device creation.
+	RPFilterLoose bool
 }
 
 // VIDVNIMapping represents a single VID↔VNI mapping for bridge VXLAN configuration.

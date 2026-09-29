@@ -6,6 +6,8 @@ package netlinkdevicemanager
 import (
 	"fmt"
 	"net"
+	"os"
+	"strings"
 
 	"github.com/vishvananda/netlink"
 	nl "github.com/vishvananda/netlink/nl"
@@ -147,7 +149,17 @@ func applyDeviceConfig(cfg *managedDeviceConfig, state *managedDeviceState) (err
 		return err
 	}
 
-	return ensureDeviceUp(linkState)
+	if err := ensureDeviceUp(linkState); err != nil {
+		return err
+	}
+
+	if cfg.RPFilterLoose {
+		if err := ensureRPFilterLoose(name); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 // createLink creates a netlink device with our ownership alias and returns
@@ -247,6 +259,34 @@ func ensureDeviceUp(link netlink.Link) error {
 	if err := util.GetNetLinkOps().LinkSetUp(link); err != nil {
 		return fmt.Errorf("failed to set link %s up: %w", link.Attrs().Name, err)
 	}
+	return nil
+}
+
+// rpFilterLooseMode is the sysctl value for loose reverse-path filtering
+// (RFC 3704 loose mode): a source is accepted if it is reachable via any
+// interface, not only the one the packet arrived on.
+const rpFilterLooseMode = "2"
+
+// ensureRPFilterLoose sets the IPv4 reverse-path filter of the named device to
+// loose mode by writing directly to /proc. The device name is used verbatim in
+// the path (dots are valid in /proc component names), which avoids the
+// dot/slash separator translation that the sysctl CLI applies and that is
+// error-prone for dotted SVI names such as "cvl3.f61ee1a4". The write is
+// skipped when the value already matches, keeping reconciliation idempotent.
+// There is no IPv6 equivalent: IPv6 has no strict rp_filter mode.
+func ensureRPFilterLoose(name string) error {
+	path := fmt.Sprintf("/proc/sys/net/ipv4/conf/%s/rp_filter", name)
+	current, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("failed to read rp_filter for device %s: %w", name, err)
+	}
+	if strings.TrimSpace(string(current)) == rpFilterLooseMode {
+		return nil
+	}
+	if err := os.WriteFile(path, []byte(rpFilterLooseMode), 0o644); err != nil {
+		return fmt.Errorf("failed to set rp_filter loose mode for device %s: %w", name, err)
+	}
+	klog.V(5).Infof("NetlinkDeviceManager: set rp_filter loose mode for device %s", name)
 	return nil
 }
 
