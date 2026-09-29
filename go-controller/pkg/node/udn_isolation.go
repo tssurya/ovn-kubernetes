@@ -372,6 +372,21 @@ func kubeletCgroupMatch(cgroupPath string) []string {
 }
 
 func (m *UDNHostIsolationManager) addRules(tx *knftables.Transaction) {
+	// Inter-UDN pod traffic between networks joined by a ClusterNetworkConnect (CNC)
+	// is re-injected from OVN into the host for the cross-VRF hop; its destination is
+	// a sibling UDN pod IP, which would otherwise be dropped by the rules below. Jump
+	// first to the dynamically-managed udn-cnc-allow chain (shared with udn-bgp-drop)
+	// so such traffic is accepted before the isolation drops. The chain is created
+	// here (never flushed) so the jump always resolves regardless of setup ordering;
+	// its contents are owned by ReconcileCNCIsolationExemptions and are empty until a
+	// CNC connects networks, making the jump a no-op otherwise.
+	if util.IsNetworkConnectEnabled() {
+		tx.Add(&knftables.Chain{Name: nftablesUDNCNCAllowChain})
+		tx.Add(&knftables.Rule{
+			Chain: UDNIsolationChain,
+			Rule:  knftables.Concat("jump", nftablesUDNCNCAllowChain),
+		})
+	}
 	if m.ipv4 {
 		tx.Add(&knftables.Rule{
 			Chain: UDNIsolationChain,
