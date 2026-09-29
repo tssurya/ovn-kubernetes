@@ -302,13 +302,14 @@ func mustParseCIDR(s string) *net.IPNet {
 
 func TestGenCNCParentVRFSection(t *testing.T) {
 	tests := []struct {
-		name            string
-		parentVRFName   string
-		asn             uint32
-		l3VNI           int32
-		childVRFNames   []string
-		allChildSubnets []cncSubnet
-		want            string
+		name              string
+		parentVRFName     string
+		asn               uint32
+		l3VNI             int32
+		childVRFNames     []string
+		allChildSubnets   []cncSubnet
+		ipVRFChildSubnets []cncSubnet
+		want              string
 	}{
 		{
 			name:          "zero VNI returns empty",
@@ -457,10 +458,54 @@ exit
 !
 `,
 		},
+		{
+			name:          "IP-VRF child subnet denied on advertise, MAC-VRF-only subnet still advertised",
+			parentVRFName: "cnc-tenant-vrf",
+			asn:           65000,
+			l3VNI:         5000,
+			childVRFNames: []string{"green-udn-vrf", "blue-udn-vrf"}, // unsorted input
+			allChildSubnets: []cncSubnet{
+				{CIDR: mustParseCIDR("10.2.0.0/24"), HostSubnetLength: 0},  // green MAC-VRF-only (Layer2)
+				{CIDR: mustParseCIDR("10.1.0.0/16"), HostSubnetLength: 24}, // blue IP-VRF (Layer3)
+			},
+			ipVRFChildSubnets: []cncSubnet{
+				{CIDR: mustParseCIDR("10.1.0.0/16"), HostSubnetLength: 24}, // blue IP-VRF only
+			},
+			want: `ip prefix-list CNC-CNC-TENANT-VRF-PREFIXES seq 10 permit 10.1.0.0/16 le 24
+ip prefix-list CNC-CNC-TENANT-VRF-PREFIXES seq 20 permit 10.2.0.0/24
+!
+route-map CNC-CNC-TENANT-VRF-IMPORT permit 10
+ match ip address prefix-list CNC-CNC-TENANT-VRF-PREFIXES
+route-map CNC-CNC-TENANT-VRF-IMPORT deny 20
+!
+ip prefix-list CNC-CNC-TENANT-VRF-IPVRF seq 10 permit 10.1.0.0/16 le 32
+!
+route-map CNC-CNC-TENANT-VRF-ADVERTISE deny 10
+ match ip address prefix-list CNC-CNC-TENANT-VRF-IPVRF
+route-map CNC-CNC-TENANT-VRF-ADVERTISE permit 20
+!
+vrf cnc-tenant-vrf
+ vni 5000
+exit-vrf
+!
+router bgp 65000 vrf cnc-tenant-vrf
+ address-family ipv4 unicast
+  import vrf route-map CNC-CNC-TENANT-VRF-IMPORT
+  import vrf blue-udn-vrf
+  import vrf green-udn-vrf
+ exit-address-family
+ address-family l2vpn evpn
+  advertise ipv4 unicast route-map CNC-CNC-TENANT-VRF-ADVERTISE
+  advertise ipv6 unicast
+ exit-address-family
+exit
+!
+`,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := genCNCParentVRFSection(tt.parentVRFName, tt.asn, tt.l3VNI, tt.childVRFNames, tt.allChildSubnets)
+			got := genCNCParentVRFSection(tt.parentVRFName, tt.asn, tt.l3VNI, tt.childVRFNames, tt.allChildSubnets, tt.ipVRFChildSubnets)
 			if got != tt.want {
 				t.Errorf("genCNCParentVRFSection() mismatch\nGot:\n%s\nWant:\n%s", got, tt.want)
 			}

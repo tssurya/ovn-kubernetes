@@ -140,14 +140,15 @@ func generateRawConfig(selected *selectedNetworks, vrfNeighbors map[string][]str
 	// enter the BGP RIB for the parent to import and type-5-advertise.
 	globalASN := vrfASNs[""]
 	for _, cncCfg := range selected.cncParentVRFConfigs {
-		var allChildSubnets []cncSubnet
+		var allChildSubnets, ipVRFChildSubnets []cncSubnet
 		for _, child := range cncCfg.IPVRFChildren {
 			allChildSubnets = append(allChildSubnets, child.Subnets...)
+			ipVRFChildSubnets = append(ipVRFChildSubnets, child.Subnets...)
 		}
 		for _, child := range cncCfg.MACVRFOnlyChildren {
 			allChildSubnets = append(allChildSubnets, child.Subnets...)
 		}
-		buf.WriteString(genCNCParentVRFSection(cncCfg.ParentVRFName, globalASN, cncCfg.ParentVNI, cncCfg.ChildVRFNames, allChildSubnets))
+		buf.WriteString(genCNCParentVRFSection(cncCfg.ParentVRFName, globalASN, cncCfg.ParentVNI, cncCfg.ChildVRFNames, allChildSubnets, ipVRFChildSubnets))
 		for _, child := range cncCfg.IPVRFChildren {
 			buf.WriteString(genCNCIPVRFChildSection(child.VRFName, cncCfg.ParentVRFName, globalASN, child.Subnets))
 		}
@@ -372,6 +373,16 @@ func cncPrefixListBound(s cncSubnet) string {
 // so the parent only absorbs CUDN subnets from children — not any external
 // routes a child may have learned — preventing cross-CUDN external route leakage.
 //
+// ipVRFChildSubnets is the subset of allChildSubnets belonging to children that
+// own a dedicated IP-VRF L3VNI. Those children self-originate their own subnets
+// as Type-5 under their own route-target, so the parent must NOT re-advertise
+// them: every node imports the same per-node /24 slices into its parent VRF and
+// re-originates them under the shared parent L3VNI, producing one Type-5 path per
+// VTEP for each /24 — a spurious ECMP set whose members mostly point at the wrong
+// VTEP, blackholing cross-node traffic. When ipVRFChildSubnets is non-empty an
+// advertise route-map denies exactly those subnets while still permitting the
+// MAC-VRF-only children's subnets, for which the parent IS the IP-VRF originator.
+//
 // Generated config structure (when allChildSubnets are provided):
 //
 //	ip prefix-list CNC-<PARENT>-PREFIXES seq 10 permit <v4subnet1>
@@ -380,6 +391,12 @@ func cncPrefixListBound(s cncSubnet) string {
 //	route-map CNC-<PARENT>-IMPORT permit 10
 //	 match ip address prefix-list CNC-<PARENT>-PREFIXES
 //	route-map CNC-<PARENT>-IMPORT deny 20
+//	!
+//	ip prefix-list CNC-<PARENT>-IPVRF seq 10 permit <ipvrf-v4subnet1> le 32  <- IP-VRF children only
+//	!
+//	route-map CNC-<PARENT>-ADVERTISE deny 10
+//	 match ip address prefix-list CNC-<PARENT>-IPVRF
+//	route-map CNC-<PARENT>-ADVERTISE permit 20
 //	!
 //	vrf <parentVRFName>
 //	 vni <l3VNI>
@@ -392,21 +409,24 @@ func cncPrefixListBound(s cncSubnet) string {
 //	  import vrf <child2>
 //	 exit-address-family
 //	 address-family l2vpn evpn
-//	  advertise ipv4 unicast
+//	  advertise ipv4 unicast route-map CNC-<PARENT>-ADVERTISE  <- route-map only when IP-VRF children present
 //	  advertise ipv6 unicast
 //	 exit-address-family
 //	exit
 //	!
-func genCNCParentVRFSection(parentVRFName string, asn uint32, l3VNI int32, childVRFNames []string, allChildSubnets []cncSubnet) string {
+func genCNCParentVRFSection(parentVRFName string, asn uint32, l3VNI int32, childVRFNames []string, allChildSubnets, ipVRFChildSubnets []cncSubnet) string {
 	if asn == 0 || l3VNI == 0 {
 		return ""
 	}
 
-	// parentVRFName comes from GetCNCParentVRFName which guarantees ≤15 chars,
-	// so "CNC-" + upper(parentVRFName) + "-PREFIXES/IMPORT" fits within FRR's 63-char limit.
+	// parentVRFName comes from GetCNCParentVRFName which guarantees ≤15 chars, so
+	// "CNC-" + upper(parentVRFName) + "-PREFIXES/IMPORT/IPVRF/ADVERTISE" fits within
+	// FRR's 63-char limit.
 	base := strings.ToUpper(parentVRFName)
 	prefixList := "CNC-" + base + "-PREFIXES"
 	importMap := "CNC-" + base + "-IMPORT"
+	ipVRFList := "CNC-" + base + "-IPVRF"
+	advertiseMap := "CNC-" + base + "-ADVERTISE"
 
 	// Collect and sort IPv4 subnets from all children for the parent import filter.
 	var v4Subnets []cncSubnet
@@ -417,6 +437,20 @@ func genCNCParentVRFSection(parentVRFName string, asn uint32, l3VNI int32, child
 	}
 	slices.SortFunc(v4Subnets, func(a, b cncSubnet) int {
 		return strings.Compare(a.CIDR.String(), b.CIDR.String())
+	})
+
+	// Collect and sort IPv4 subnets from IP-VRF children only. These are denied on
+	// the parent's Type-5 advertise so the parent does not re-originate subnets that
+	// their owning children already self-originate under their own L3VNI (see the
+	// function doc for the ECMP/wrong-VTEP blackhole this prevents).
+	var ipVRFv4Subnets []*net.IPNet
+	for _, subnet := range ipVRFChildSubnets {
+		if subnet.CIDR.IP.To4() != nil {
+			ipVRFv4Subnets = append(ipVRFv4Subnets, subnet.CIDR)
+		}
+	}
+	slices.SortFunc(ipVRFv4Subnets, func(a, b *net.IPNet) int {
+		return strings.Compare(a.String(), b.String())
 	})
 
 	var buf strings.Builder
@@ -445,6 +479,23 @@ func genCNCParentVRFSection(parentVRFName string, asn uint32, l3VNI int32, child
 		buf.WriteString("!\n")
 	}
 
+	// Advertise route-map: deny IP-VRF children's subnets (they self-originate via
+	// their own L3VNI) and permit everything else (MAC-VRF-only children's subnets,
+	// which the parent originates as their IP-VRF). Only emitted when IP-VRF children
+	// contribute subnets; otherwise the parent advertises unconditionally.
+	if len(ipVRFv4Subnets) > 0 {
+		for i, subnet := range ipVRFv4Subnets {
+			// le 32: match the CUDN aggregate and all more-specific per-node /24
+			// slices the IP-VRF children advertise, so none re-originate here.
+			fmt.Fprintf(&buf, "ip prefix-list %s seq %d permit %s le 32\n", ipVRFList, (i+1)*10, subnet)
+		}
+		buf.WriteString("!\n")
+		fmt.Fprintf(&buf, "route-map %s deny 10\n", advertiseMap)
+		fmt.Fprintf(&buf, " match ip address prefix-list %s\n", ipVRFList)
+		fmt.Fprintf(&buf, "route-map %s permit 20\n", advertiseMap)
+		buf.WriteString("!\n")
+	}
+
 	// VRF-to-VNI mapping for the parent VRF.
 	fmt.Fprintf(&buf, "vrf %s\n vni %d\nexit-vrf\n!\n", parentVRFName, l3VNI)
 
@@ -466,7 +517,11 @@ func genCNCParentVRFSection(parentVRFName string, asn uint32, l3VNI int32, child
 
 	// l2vpn evpn section: re-advertise imported routes as EVPN Type-5.
 	buf.WriteString(" address-family l2vpn evpn\n")
-	buf.WriteString("  advertise ipv4 unicast\n")
+	if len(ipVRFv4Subnets) > 0 {
+		fmt.Fprintf(&buf, "  advertise ipv4 unicast route-map %s\n", advertiseMap)
+	} else {
+		buf.WriteString("  advertise ipv4 unicast\n")
+	}
 	buf.WriteString("  advertise ipv6 unicast\n")
 	buf.WriteString(" exit-address-family\n")
 
