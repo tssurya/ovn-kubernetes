@@ -1886,7 +1886,6 @@ func (c *Controller) populateCNCParentVRFConfigs(selected *selectedNetworks, net
 				continue
 			}
 			vrfName := util.GetNetworkVRFName(network)
-			childVRFNames = append(childVRFNames, vrfName)
 
 			hasIPVRF := network.EVPNIPVRFVNI() > 0
 			hasMACVRFOnly := network.EVPNMACVRFVNI() > 0 && !hasIPVRF
@@ -1903,6 +1902,14 @@ func (c *Controller) populateCNCParentVRFConfigs(selected *selectedNetworks, net
 			}
 
 			if hasIPVRF {
+				// Only IP-VRF children are imported by the parent: they own a dedicated
+				// IP-VRF/VNI, so the parent must "import vrf <child>" to learn their
+				// subnets and re-advertise them via the L3VNI as Type-5. MAC-VRF-only
+				// children are deliberately excluded — the parent VRF is their IP-VRF
+				// (their L2 SVI is enslaved to it), so their subnets are already connected
+				// in the parent and their pods are reached over the stretched L2VNI
+				// (Type-2), making a parent "import vrf" redundant.
+				childVRFNames = append(childVRFNames, vrfName)
 				ipVRFChildren = append(ipVRFChildren, &cncIPVRFChild{
 					VRFName: vrfName,
 					Subnets: subnets,
