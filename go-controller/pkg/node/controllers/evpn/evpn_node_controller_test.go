@@ -40,6 +40,7 @@ import (
 	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/networkmanager"
 	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/node/netlinkdevicemanager"
 	ndmmocks "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/node/netlinkdevicemanager/mocks"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/node/routemanager"
 	libovsdbtest "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/testing/libovsdb"
 	vtepinfmocks "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/testing/mocks/github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/vtep/v1/apis/informers/externalversions/vtep/v1"
 	vteplistmocks "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/testing/mocks/github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/vtep/v1/apis/listers/vtep/v1"
@@ -268,6 +269,48 @@ var _ = Describe("EVPN node controller", func() {
 				vlan, ok := cfg.Link.(*netlink.Vlan)
 				return ok && cfg.Link.Attrs().Name == l2SVIName && vlan.VlanId == 100 &&
 					cfg.VLANParent == bridgeName && cfg.Master == vrfName
+			}))
+		})
+
+		It("enslaves a MAC-VRF-only network's L2 SVI to the CNC parent VRF when l2SVIMaster is set", func() {
+			bridgeName := "br-evtest"
+			ndm := &ndmmocks.Interface{}
+			ndm.On("EnsureLink", mock.Anything).Return(nil)
+
+			ctrl := &Controller{ndm: ndm, svisByBridge: make(map[string]sets.Set[string])}
+			networks := []evpnNetworkInfo{{
+				macVRFVID:   100,
+				l2SVIName:   "svl2-beta",
+				vrfName:     "evpn-l2-beta",
+				l2SVIMaster: "cnc.parent",
+			}}
+
+			Expect(ctrl.reconcileSVIs(bridgeName, networks)).To(Succeed())
+
+			// L2 SVI is enslaved to the parent VRF, not the network's own VRF.
+			ndm.AssertCalled(GinkgoT(), "EnsureLink", mock.MatchedBy(func(cfg netlinkdevicemanager.DeviceConfig) bool {
+				vlan, ok := cfg.Link.(*netlink.Vlan)
+				return ok && cfg.Link.Attrs().Name == "svl2-beta" && vlan.VlanId == 100 &&
+					cfg.VLANParent == bridgeName && cfg.Master == "cnc.parent"
+			}))
+		})
+
+		It("falls back to the network VRF for the L2 SVI master when l2SVIMaster is empty", func() {
+			bridgeName := "br-evtest"
+			ndm := &ndmmocks.Interface{}
+			ndm.On("EnsureLink", mock.Anything).Return(nil)
+
+			ctrl := &Controller{ndm: ndm, svisByBridge: make(map[string]sets.Set[string])}
+			networks := []evpnNetworkInfo{{
+				macVRFVID: 100,
+				l2SVIName: "svl2-beta",
+				vrfName:   "evpn-l2-beta",
+			}}
+
+			Expect(ctrl.reconcileSVIs(bridgeName, networks)).To(Succeed())
+
+			ndm.AssertCalled(GinkgoT(), "EnsureLink", mock.MatchedBy(func(cfg netlinkdevicemanager.DeviceConfig) bool {
+				return cfg.Link.Attrs().Name == "svl2-beta" && cfg.Master == "evpn-l2-beta"
 			}))
 		})
 
@@ -827,7 +870,7 @@ var _ = Describe("EVPN node controller", func() {
 			fakeNM = &networkmanager.FakeNetworkManager{}
 			var ovsClient libovsdbclient.Client
 			ovsClient, ovsCleanup = newTestOVSClient()
-			ctrl, err = NewController(nodeName, wf, &kube.Kube{KClient: kubeClient}, ndm, fakeNM, ovsClient, am)
+			ctrl, err = NewController(nodeName, wf, &kube.Kube{KClient: kubeClient}, ndm, fakeNM, ovsClient, am, routemanager.NewController())
 			Expect(err).NotTo(HaveOccurred())
 			Expect(ctrl.Start()).To(Succeed())
 		})

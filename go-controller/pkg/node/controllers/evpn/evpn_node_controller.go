@@ -6,6 +6,7 @@ package evpn
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"net"
 	"net/netip"
 	"reflect"
@@ -44,6 +45,7 @@ import (
 	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/networkmanager"
 	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/node"
 	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/node/netlinkdevicemanager"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/node/routemanager"
 	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/types"
 	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
 	utilerrors "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util/errors"
@@ -82,6 +84,12 @@ const (
 	// This range is safely above regular CUDN VRF tables (RoutingTableIDStart + ifIndex, practically ≤ ~66000)
 	// and DPU VRF tables (100000 + networkID, practically ≤ ~110000).
 	cncParentVRFTableBase = 1000000
+
+	// cncSiblingRouteMetric is the priority of the child-VRF routes that steer
+	// inter-UDN egress toward the CNC parent VRF. A low, non-zero metric keeps
+	// them preferred over any leaked aggregate while still losing to the more
+	// specific per-pod routes symmetric IRB imports into the child VRF.
+	cncSiblingRouteMetric = 5
 )
 
 type Controller struct {
@@ -92,6 +100,7 @@ type Controller struct {
 	ndm            netlinkdevicemanager.Interface
 	ovsClient      libovsdbclient.Client
 	addressManager nodeAddressManager
+	routeManager   *routemanager.Controller
 
 	// vtepController reconciles VTEP CRs: ensures bridge, VXLAN, SVI, and OVS port
 	// lifecycle for each VTEP assigned to this node.
@@ -144,27 +153,52 @@ type Controller struct {
 	// for consistent lifecycle: when the bridge (VTEP) is deleted all its CNC VRF devices are too.
 	cncVRFDevicesByBridge map[string]sets.Set[string]
 
+	// cncSiblingRoutesLock guards cncSiblingRoutesByVTEP.
+	cncSiblingRoutesLock sync.Mutex
+	// cncSiblingRoutesByVTEP tracks the child-VRF sibling-subnet routes programmed
+	// through the route manager per VTEP, so stale routes are removed when a CNC's
+	// connected set changes or a network/VTEP is removed.
+	cncSiblingRoutesByVTEP map[string]map[siblingRouteKey]siblingRouteEntry
+
 	stopChan chan struct{}
 }
 
-func NewController(nodeName string, wf factory.NodeWatchFactory, kube kube.Interface, ndm netlinkdevicemanager.Interface, networkMgr networkmanager.Interface, ovsClient libovsdbclient.Client, addressManager nodeAddressManager) (*Controller, error) {
+// siblingRouteKey identifies a child-VRF sibling route by its destination and
+// routing table; it matches the route manager's own (dst, table, priority) key
+// space (priority is fixed at cncSiblingRouteMetric for these routes).
+type siblingRouteKey struct {
+	dst   string
+	table int
+}
+
+// siblingRouteEntry records a programmed sibling route together with the CNC
+// that owns it, so routes for a CNC whose parent VRF is not yet ready can be
+// carried forward across reconciles instead of being deleted and re-added.
+type siblingRouteEntry struct {
+	route netlink.Route
+	cnc   string
+}
+
+func NewController(nodeName string, wf factory.NodeWatchFactory, kube kube.Interface, ndm netlinkdevicemanager.Interface, networkMgr networkmanager.Interface, ovsClient libovsdbclient.Client, addressManager nodeAddressManager, routeManager *routemanager.Controller) (*Controller, error) {
 	if addressManager == nil {
 		return nil, fmt.Errorf("EVPN node VTEP controller requires a non-nil node address manager")
 	}
 
 	c := &Controller{
-		nodeName:              nodeName,
-		watchFactory:          wf,
-		kube:                  kube,
-		networkMgr:            networkMgr,
-		ndm:                   ndm,
-		ovsClient:             ovsClient,
-		addressManager:        addressManager,
-		nadVTEPInfo:           make(map[string]string),
-		svisByBridge:          make(map[string]sets.Set[string]),
-		cncVRFsByBridge:       make(map[string]sets.Set[string]),
-		cncVRFDevicesByBridge: make(map[string]sets.Set[string]),
-		stopChan:              make(chan struct{}),
+		nodeName:               nodeName,
+		watchFactory:           wf,
+		kube:                   kube,
+		networkMgr:             networkMgr,
+		ndm:                    ndm,
+		ovsClient:              ovsClient,
+		addressManager:         addressManager,
+		routeManager:           routeManager,
+		nadVTEPInfo:            make(map[string]string),
+		svisByBridge:           make(map[string]sets.Set[string]),
+		cncVRFsByBridge:        make(map[string]sets.Set[string]),
+		cncVRFDevicesByBridge:  make(map[string]sets.Set[string]),
+		cncSiblingRoutesByVTEP: make(map[string]map[siblingRouteKey]siblingRouteEntry),
+		stopChan:               make(chan struct{}),
 	}
 
 	vtepInformer := wf.VTEPInformer()
@@ -520,12 +554,32 @@ func (c *Controller) ensureDevices(vtep *vtepv1.VTEP, vtepIPv4, vtepIPv6 net.IP)
 		}
 	}
 
+	// Reconcile CNC parent VRFs before SVIs: a MAC-VRF-only network's L2 SVI may be
+	// enslaved to a CNC parent VRF (the parent acts as its IP-VRF), so the parent VRF
+	// device must already exist when reconcileSVIs masters the SVI to it.
+	if err := c.reconcileCNCParentVRFs(bridgeName, cncConfigs); err != nil {
+		return nil, fmt.Errorf("failed to reconcile VTEP %s CNC parent VRFs: %w", vtep.Name, err)
+	}
+
+	macVRFParents, err := c.collectMACVRFParentVRFMap(vtep.Name)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve VTEP %s MAC-VRF parent VRFs: %w", vtep.Name, err)
+	}
+	for i := range networks {
+		if parent, ok := macVRFParents[networks[i].vrfName]; ok {
+			networks[i].l2SVIMaster = parent
+		}
+	}
+
 	if err := c.reconcileSVIs(bridgeName, networks); err != nil {
 		return nil, fmt.Errorf("failed to reconcile VTEP %s SVIs: %w", vtep.Name, err)
 	}
 
-	if err := c.reconcileCNCParentVRFs(bridgeName, cncConfigs); err != nil {
-		return nil, fmt.Errorf("failed to reconcile VTEP %s CNC parent VRFs: %w", vtep.Name, err)
+	// Program child-VRF override routes that steer inter-UDN egress toward the CNC
+	// parent VRF (hub). This runs after the SVIs/parent VRFs so the devices the routes
+	// reference are in flight; missing devices are handled by carry-forward inside.
+	if err := c.reconcileCNCSiblingRoutes(vtep.Name); err != nil {
+		return nil, fmt.Errorf("failed to reconcile VTEP %s CNC sibling routes: %w", vtep.Name, err)
 	}
 
 	return networks, nil
@@ -571,6 +625,12 @@ type evpnNetworkInfo struct {
 	ovsPortName          string
 	macVRFLSPName        string
 	vrfName              string
+	// l2SVIMaster is the VRF the L2 (MAC-VRF) SVI is enslaved to. It defaults to
+	// vrfName (the network's own VRF). For a MAC-VRF-only (Layer2, no IP-VRF) network
+	// connected by an EVPN CNC it is set to the CNC parent VRF, so the parent VRF acts
+	// as the network's IP-VRF and FRR runs symmetric IRB for the L2-only CUDN over the
+	// parent's L3 VNI. Empty is treated as vrfName by reconcileSVIs.
+	l2SVIMaster string
 }
 
 // cncParentVRFInfo holds the desired Linux device state for a CNC parent VRF.
@@ -750,6 +810,49 @@ func (c *Controller) forEachCNCEVPNNetwork(cnc *networkconnectv1.ClusterNetworkC
 	return nil
 }
 
+// collectMACVRFParentVRFMap returns, for each MAC-VRF-only (Layer2, no IP-VRF) EVPN
+// network connected by an EVPN CNC and using vtepName, a mapping from the network's
+// Linux VRF name to the connecting CNC's parent VRF name. Enslaving such a network's
+// L2 (MAC-VRF) SVI to the parent VRF makes the parent act as the network's IP-VRF, so
+// FRR performs symmetric IRB for the L2-only CUDN over the parent's L3 VNI. Networks
+// with their own IP-VRF keep their own SVI master and are not included.
+func (c *Controller) collectMACVRFParentVRFMap(vtepName string) (map[string]string, error) {
+	if c.cncLister == nil {
+		return nil, nil
+	}
+	cncs, err := c.cncLister.List(labels.Everything())
+	if err != nil {
+		return nil, fmt.Errorf("failed to list CNCs: %w", err)
+	}
+	result := make(map[string]string)
+	for _, cnc := range cncs {
+		if cnc.Spec.EVPNConfiguration == nil {
+			continue
+		}
+		vid, err := util.ParseNetworkConnectEVPNParentVRFVIDAnnotation(cnc)
+		if err != nil {
+			klog.Warningf("CNC %s: invalid VID annotation, skipping MAC-VRF parent mapping: %v", cnc.Name, err)
+			continue
+		}
+		if vid == 0 {
+			// VID not yet allocated by clustermanager; parent VRF not ready.
+			continue
+		}
+		parentVRF := util.GetCNCParentVRFName(cnc.Name)
+		err = c.forEachCNCEVPNNetwork(cnc, vtepName, func(network util.NetInfo) bool {
+			// MAC-VRF-only: has a MAC-VRF VID but no IP-VRF VID of its own.
+			if network.EVPNMACVRFVID() != 0 && network.EVPNIPVRFVID() == 0 {
+				result[util.GetNetworkVRFName(network)] = parentVRF
+			}
+			return true
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
+	return result, nil
+}
+
 // reconcileCNCParentVRFs ensures the desired CNC parent VRF devices and SVIs exist
 // on the given bridge, and removes stale ones. The VRF device is created first;
 // the SVI is then mastered to it so FRR can perform EVPN import-vrf routing.
@@ -764,6 +867,10 @@ func (c *Controller) reconcileCNCParentVRFs(bridgeName string, configs []*cncPar
 				LinkAttrs: netlink.LinkAttrs{Name: cfg.vrfName},
 				Table:     cfg.tableID,
 			},
+			// Cross-VRF inter-UDN transit is reinjected through this VRF master by
+			// l3mdev; strict RPF on the VRF device drops the asymmetric reverse path,
+			// so run loose reverse-path filtering.
+			RPFilterLoose: true,
 		}); err != nil {
 			return fmt.Errorf("failed to ensure CNC parent VRF device %s: %w", cfg.vrfName, err)
 		}
@@ -774,6 +881,10 @@ func (c *Controller) reconcileCNCParentVRFs(bridgeName string, configs []*cncPar
 			},
 			VLANParent: bridgeName,
 			Master:     cfg.vrfName,
+			// The parent VRF's L3VNI SVI is where inter-UDN traffic ingresses before
+			// being forwarded to a child VRF; the reverse route resolves via the child
+			// SVI, so run loose reverse-path filtering to avoid strict-RPF drops.
+			RPFilterLoose: true,
 		}); err != nil {
 			return fmt.Errorf("failed to ensure CNC parent VRF SVI %s: %w", cfg.sviName, err)
 		}
@@ -801,6 +912,191 @@ func (c *Controller) reconcileCNCParentVRFs(bridgeName string, configs []*cncPar
 	c.cncVRFDevicesByBridge[bridgeName] = desiredVRFs
 
 	return nil
+}
+
+// reconcileCNCSiblingRoutes programs, in each local EVPN child network's own VRF
+// routing table, override routes that steer traffic destined to a sibling network's
+// pod subnet into the CNC parent VRF (hub). The parent VRF then performs the
+// inter-UDN lookup and forwards to the correct child, implementing hub-and-spoke
+// routing without every child importing every other child's routes.
+//
+// Each connected network's pod subnets come from its CUDN spec (NetInfo.Subnets),
+// not the connect-subnet annotation, which is only populated for Geneve-transport
+// CNCs. For every local network N connected by the CNC we install, in N's VRF table,
+// a route per sibling subnet with output device = the CNC parent VRF, so the kernel
+// re-looks-up the packet in the parent VRF's table (Linux VRF leaking via a device
+// route). These routes use a low, non-zero metric so a more-specific per-pod route
+// imported by symmetric IRB still wins, while a leaked aggregate does not.
+//
+// The parent VRF device and the per-network management ports are created asynchronously
+// (by NDM and the management-port controller respectively). When either is not yet
+// present, the CNC's routes are deferred: any routes already programmed for that CNC are
+// carried forward (kept in the store, not deleted) so they do not flap, and the reconcile
+// returns nil for that CNC. The route manager's own periodic sync restores any route that
+// is externally removed. Stale routes (a CNC's connected set shrank, or a network/VTEP
+// was removed) are deleted.
+func (c *Controller) reconcileCNCSiblingRoutes(vtepName string) error {
+	if c.cncLister == nil {
+		return nil
+	}
+	cncs, err := c.cncLister.List(labels.Everything())
+	if err != nil {
+		return fmt.Errorf("failed to list CNCs: %w", err)
+	}
+
+	c.cncSiblingRoutesLock.Lock()
+	defer c.cncSiblingRoutesLock.Unlock()
+	stored := c.cncSiblingRoutesByVTEP[vtepName]
+
+	desired := make(map[siblingRouteKey]siblingRouteEntry)
+	// notReady tracks CNCs whose parent VRF device or a connected network's management
+	// port is not yet present; their previously programmed routes are carried forward.
+	notReady := sets.New[string]()
+
+	for _, cnc := range cncs {
+		if cnc.Spec.EVPNConfiguration == nil {
+			continue
+		}
+		// The parent VRF device is created asynchronously by NDM; defer until it exists.
+		parentVRFName := util.GetCNCParentVRFName(cnc.Name)
+		parentLink, err := util.GetNetLinkOps().LinkByName(parentVRFName)
+		if err != nil {
+			var linkNotFound netlink.LinkNotFoundError
+			if errors.As(err, &linkNotFound) {
+				notReady.Insert(cnc.Name)
+				continue
+			}
+			return fmt.Errorf("failed to resolve CNC %s parent VRF %s: %w", cnc.Name, parentVRFName, err)
+		}
+
+		// EVPN CNCs do not use the Geneve-only connect-subnet annotation. Each
+		// connected network carries its real pod subnets in its CUDN spec, so read
+		// them from NetInfo. Collect every network the CNC connects: its owner, ID
+		// and subnets. The union of subnets per owner is the sibling set; each
+		// network's routes exclude its own subnets.
+		type cncNet struct {
+			networkID int
+			owner     string
+		}
+		var nets []cncNet
+		ownerSubnets := make(map[string][]*net.IPNet)
+		err = c.forEachCNCEVPNNetwork(cnc, vtepName, func(network util.NetInfo) bool {
+			networkID := network.GetNetworkID()
+			owner := util.ComputeNetworkOwner(network.TopologyType(), networkID)
+			nets = append(nets, cncNet{networkID: networkID, owner: owner})
+			for _, entry := range network.Subnets() {
+				if entry.CIDR != nil {
+					ownerSubnets[owner] = append(ownerSubnets[owner], entry.CIDR)
+				}
+			}
+			return true
+		})
+		if err != nil {
+			return err
+		}
+
+		// Program, in each local network's VRF table, a route to every sibling
+		// network's subnet via the parent VRF. Accumulate this CNC's routes
+		// separately so a partially-ready CNC (some management ports missing) is
+		// deferred atomically rather than half-applied.
+		cncRoutes := make(map[siblingRouteKey]siblingRouteEntry)
+		cncNotReady := false
+		for _, n := range nets {
+			// A network whose ID is not yet allocated cannot have a stable management
+			// port name; defer the whole CNC until every connected network resolves.
+			if n.networkID == types.InvalidID {
+				cncNotReady = true
+				break
+			}
+			// The child network's VRF routing table is keyed off its management port's
+			// ifindex; the management-port controller creates it asynchronously.
+			mgmtPortName := util.GetNetworkScopedK8sMgmtHostIntfName(uint(n.networkID))
+			mgmtLink, err := util.GetNetLinkOps().LinkByName(mgmtPortName)
+			if err != nil {
+				var linkNotFound netlink.LinkNotFoundError
+				if errors.As(err, &linkNotFound) {
+					cncNotReady = true
+					break
+				}
+				return fmt.Errorf("failed to resolve network %d management port %s: %w", n.networkID, mgmtPortName, err)
+			}
+			tableID := util.CalculateRouteTableID(mgmtLink.Attrs().Index)
+
+			for owner, subnets := range ownerSubnets {
+				if owner == n.owner {
+					continue
+				}
+				for _, subnet := range subnets {
+					route := netlink.Route{
+						Dst:       subnet,
+						Table:     tableID,
+						LinkIndex: parentLink.Attrs().Index,
+						Priority:  cncSiblingRouteMetric,
+						Protocol:  netlink.RouteProtocol(types.OVNKProtocol),
+					}
+					cncRoutes[siblingRouteKey{dst: subnet.String(), table: tableID}] = siblingRouteEntry{route: route, cnc: cnc.Name}
+				}
+			}
+		}
+		if cncNotReady {
+			notReady.Insert(cnc.Name)
+			continue
+		}
+		maps.Copy(desired, cncRoutes)
+	}
+
+	// Carry forward routes owned by not-ready CNCs so they are neither re-added
+	// (their parent VRF/management port may be gone) nor deleted (avoid flapping).
+	for k, v := range stored {
+		if notReady.Has(v.cnc) {
+			if _, ok := desired[k]; !ok {
+				desired[k] = v
+			}
+		}
+	}
+
+	newStore := make(map[siblingRouteKey]siblingRouteEntry)
+	var errs []error
+	for k, v := range desired {
+		if notReady.Has(v.cnc) {
+			// Already programmed on a prior reconcile; keep without touching netlink.
+			newStore[k] = v
+			continue
+		}
+		if err := c.routeManager.Add(v.route); err != nil {
+			errs = append(errs, fmt.Errorf("failed to add CNC %s sibling route %s: %w", v.cnc, v.route.Dst, err))
+			continue
+		}
+		newStore[k] = v
+	}
+	for k, v := range stored {
+		if _, ok := desired[k]; ok {
+			continue
+		}
+		if err := c.routeManager.Del(v.route); err != nil {
+			errs = append(errs, fmt.Errorf("failed to delete stale CNC %s sibling route %s: %w", v.cnc, v.route.Dst, err))
+			newStore[k] = v // keep to retry deletion
+			continue
+		}
+	}
+
+	if len(newStore) == 0 {
+		delete(c.cncSiblingRoutesByVTEP, vtepName)
+	} else {
+		c.cncSiblingRoutesByVTEP[vtepName] = newStore
+	}
+
+	// The parent VRF device and per-network management ports are created
+	// asynchronously (NDM and the management-port controller). When a CNC is
+	// deferred because one of those is not yet present, nothing else will
+	// re-trigger this reconcile once they appear, so requeue the VTEP with backoff
+	// until the deferred CNCs become programmable.
+	if notReady.Len() > 0 {
+		klog.V(4).Infof("VTEP %s: %d CNC(s) not ready for sibling routes (parent VRF or management port pending), requeuing", vtepName, notReady.Len())
+		c.vtepController.ReconcileRateLimited(vtepName)
+	}
+
+	return utilerrors.Join(errs...)
 }
 
 // collectEVPNNetworks gathers EVPN network info for all networks using this VTEP.
@@ -869,6 +1165,10 @@ func (c *Controller) reconcileSVIs(bridgeName string, networks []evpnNetworkInfo
 				},
 				VLANParent: bridgeName,
 				Master:     net.vrfName,
+				// Inter-UDN traffic forwarded across VRFs ingresses on this SVI but
+				// its reverse route may resolve via a different interface; strict RPF
+				// would drop it, so run loose reverse-path filtering.
+				RPFilterLoose: true,
 			}); err != nil {
 				return fmt.Errorf("failed to ensure L3 SVI %s: %w", net.l3SVIName, err)
 			}
@@ -876,13 +1176,24 @@ func (c *Controller) reconcileSVIs(bridgeName string, networks []evpnNetworkInfo
 
 		if net.macVRFVID != 0 {
 			desiredSVIs.Insert(net.l2SVIName)
+			// The L2 SVI is normally enslaved to the network's own VRF. For a
+			// MAC-VRF-only network connected by an EVPN CNC, l2SVIMaster points at the
+			// CNC parent VRF so the parent VRF becomes the network's IP-VRF.
+			l2Master := net.l2SVIMaster
+			if l2Master == "" {
+				l2Master = net.vrfName
+			}
 			if err := c.ndm.EnsureLink(netlinkdevicemanager.DeviceConfig{
 				Link: &netlink.Vlan{
 					LinkAttrs: netlink.LinkAttrs{Name: net.l2SVIName},
 					VlanId:    net.macVRFVID,
 				},
 				VLANParent: bridgeName,
-				Master:     net.vrfName,
+				Master:     l2Master,
+				// When enslaved to a CNC parent VRF this SVI is the L3 entry point for
+				// symmetric IRB and carries asymmetric cross-VRF traffic; run loose
+				// reverse-path filtering so strict RPF does not drop it.
+				RPFilterLoose: true,
 			}); err != nil {
 				return fmt.Errorf("failed to ensure L2 SVI %s: %w", net.l2SVIName, err)
 			}
@@ -1011,6 +1322,16 @@ func (c *Controller) deleteVTEPDevices(vtepName string) error {
 	}
 	delete(c.cncVRFDevicesByBridge, bridgeName)
 	c.cncVRFsByBridgeLock.Unlock()
+
+	// Remove the child-VRF sibling routes programmed for this VTEP's networks.
+	c.cncSiblingRoutesLock.Lock()
+	for _, entry := range c.cncSiblingRoutesByVTEP[vtepName] {
+		if err := c.routeManager.Del(entry.route); err != nil {
+			errs = append(errs, fmt.Errorf("failed to delete VTEP %s CNC sibling route %s: %w", vtepName, entry.route.Dst, err))
+		}
+	}
+	delete(c.cncSiblingRoutesByVTEP, vtepName)
+	c.cncSiblingRoutesLock.Unlock()
 
 	if err := c.ndm.DeleteLink(GetEVPNVXLANName(vtepName, utilnet.IPv4)); err != nil {
 		errs = append(errs, fmt.Errorf("failed to delete VTEP %s IPv4 VXLAN device: %w", vtepName, err))

@@ -481,7 +481,7 @@ func (ncm *NodeControllerManager) Start(ctx context.Context, isOVNKubeController
 	if util.IsEVPNEnabled() {
 		ncm.ndm = netlinkdevicemanager.NewController()
 
-		ncm.evpnController, err = evpn.NewController(ncm.name, ncm.watchFactory, ncm.Kube, ncm.ndm, ncm.networkManager.Interface(), ncm.ovsClient, ncm.defaultNodeNetworkController.GetNodeAddressManager())
+		ncm.evpnController, err = evpn.NewController(ncm.name, ncm.watchFactory, ncm.Kube, ncm.ndm, ncm.networkManager.Interface(), ncm.ovsClient, ncm.defaultNodeNetworkController.GetNodeAddressManager(), ncm.routeManager)
 		if err != nil {
 			return fmt.Errorf("failed to create EVPN controller: %w", err)
 		}
