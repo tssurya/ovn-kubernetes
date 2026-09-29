@@ -612,6 +612,7 @@ func (a *managedDeviceConfig) Equal(b *managedDeviceConfig) bool {
 		a.Master != b.Master ||
 		a.VLANParent != b.VLANParent ||
 		a.RPFilterLoose != b.RPFilterLoose ||
+		a.RPFilterDisable != b.RPFilterDisable ||
 		!ptr.Equal(a.BridgePortSettings, b.BridgePortSettings) {
 		return false
 	}

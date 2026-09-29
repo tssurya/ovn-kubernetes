@@ -884,9 +884,10 @@ func (c *Controller) reconcileCNCParentVRFs(bridgeName string, configs []*cncPar
 				Table:     cfg.tableID,
 			},
 			// Cross-VRF inter-UDN transit is reinjected through this VRF master by
-			// l3mdev; strict RPF on the VRF device drops the asymmetric reverse path,
-			// so run loose reverse-path filtering.
-			RPFilterLoose: true,
+			// l3mdev. The reverse route for the source resolves out another VRF
+			// master device (a table redirect), which loose RPF still rejects, so
+			// reverse-path filtering must be fully disabled, not merely loosened.
+			RPFilterDisable: true,
 		}); err != nil {
 			return fmt.Errorf("failed to ensure CNC parent VRF device %s: %w", cfg.vrfName, err)
 		}
@@ -897,10 +898,11 @@ func (c *Controller) reconcileCNCParentVRFs(bridgeName string, configs []*cncPar
 			},
 			VLANParent: bridgeName,
 			Master:     cfg.vrfName,
-			// The parent VRF's L3VNI SVI is where inter-UDN traffic ingresses before
-			// being forwarded to a child VRF; the reverse route resolves via the child
-			// SVI, so run loose reverse-path filtering to avoid strict-RPF drops.
-			RPFilterLoose: true,
+			// The parent VRF's L3VNI SVI is where VXLAN-decapped inter-UDN traffic
+			// ingresses before being forwarded to a child VRF. The reverse route for
+			// the source resolves out a child VRF master device, which loose RPF
+			// rejects, so reverse-path filtering must be fully disabled here.
+			RPFilterDisable: true,
 		}); err != nil {
 			return fmt.Errorf("failed to ensure CNC parent VRF SVI %s: %w", cfg.sviName, err)
 		}
@@ -1193,10 +1195,10 @@ func (c *Controller) reconcileSVIs(bridgeName string, networks []evpnNetworkInfo
 				},
 				VLANParent: bridgeName,
 				Master:     net.vrfName,
-				// Inter-UDN traffic forwarded across VRFs ingresses on this SVI but
-				// its reverse route may resolve via a different interface; strict RPF
-				// would drop it, so run loose reverse-path filtering.
-				RPFilterLoose: true,
+				// Inter-UDN traffic forwarded across VRFs ingresses on this SVI and
+				// its reverse route resolves out another VRF master device, which
+				// loose RPF rejects; reverse-path filtering must be fully disabled.
+				RPFilterDisable: true,
 			}); err != nil {
 				return fmt.Errorf("failed to ensure L3 SVI %s: %w", net.l3SVIName, err)
 			}
@@ -1219,9 +1221,10 @@ func (c *Controller) reconcileSVIs(bridgeName string, networks []evpnNetworkInfo
 				VLANParent: bridgeName,
 				Master:     l2Master,
 				// When enslaved to a CNC parent VRF this SVI is the L3 entry point for
-				// symmetric IRB and carries asymmetric cross-VRF traffic; run loose
-				// reverse-path filtering so strict RPF does not drop it.
-				RPFilterLoose: true,
+				// symmetric IRB and carries asymmetric cross-VRF traffic whose reverse
+				// route resolves out a VRF master device; reverse-path filtering must be
+				// fully disabled, since loose RPF rejects that reverse path.
+				RPFilterDisable: true,
 			}); err != nil {
 				return fmt.Errorf("failed to ensure L2 SVI %s: %w", net.l2SVIName, err)
 			}

@@ -153,7 +153,14 @@ func applyDeviceConfig(cfg *managedDeviceConfig, state *managedDeviceState) (err
 		return err
 	}
 
-	if cfg.RPFilterLoose {
+	// RPFilterDisable is stronger than RPFilterLoose; apply it in preference when
+	// both are set.
+	switch {
+	case cfg.RPFilterDisable:
+		if err := ensureRPFilterDisabled(name); err != nil {
+			return err
+		}
+	case cfg.RPFilterLoose:
 		if err := ensureRPFilterLoose(name); err != nil {
 			return err
 		}
@@ -267,26 +274,50 @@ func ensureDeviceUp(link netlink.Link) error {
 // interface, not only the one the packet arrived on.
 const rpFilterLooseMode = "2"
 
+// rpFilterDisabledMode is the sysctl value that fully disables reverse-path
+// filtering: no source validation is performed.
+const rpFilterDisabledMode = "0"
+
 // ensureRPFilterLoose sets the IPv4 reverse-path filter of the named device to
-// loose mode by writing directly to /proc. The device name is used verbatim in
-// the path (dots are valid in /proc component names), which avoids the
-// dot/slash separator translation that the sysctl CLI applies and that is
-// error-prone for dotted SVI names such as "cvl3.f61ee1a4". The write is
-// skipped when the value already matches, keeping reconciliation idempotent.
-// There is no IPv6 equivalent: IPv6 has no strict rp_filter mode.
+// loose mode.
 func ensureRPFilterLoose(name string) error {
+	return setDeviceRPFilter(name, rpFilterLooseMode)
+}
+
+// ensureRPFilterDisabled fully disables the IPv4 reverse-path filter for the
+// named device. Because the effective rp_filter of a device is the maximum of
+// net.ipv4.conf.all.rp_filter and net.ipv4.conf.<device>.rp_filter, a per-device
+// 0 is inert while conf.all is non-zero; this also clears conf.all so the
+// per-device setting takes effect. Clearing conf.all is node-global, but matches
+// the reverse-path-filtering posture ovn-kubernetes already relies on (asymmetric
+// datapaths), and is only requested for EVPN CNC SVIs.
+func ensureRPFilterDisabled(name string) error {
+	if err := setDeviceRPFilter("all", rpFilterDisabledMode); err != nil {
+		return err
+	}
+	return setDeviceRPFilter(name, rpFilterDisabledMode)
+}
+
+// setDeviceRPFilter writes the given rp_filter value for the named device
+// directly to /proc. The device name is used verbatim in the path (dots are
+// valid in /proc component names), which avoids the dot/slash separator
+// translation that the sysctl CLI applies and that is error-prone for dotted SVI
+// names such as "cvl3.f61ee1a4". The write is skipped when the value already
+// matches, keeping reconciliation idempotent. There is no IPv6 equivalent: IPv6
+// has no strict rp_filter mode.
+func setDeviceRPFilter(name, value string) error {
 	path := fmt.Sprintf("/proc/sys/net/ipv4/conf/%s/rp_filter", name)
 	current, err := os.ReadFile(path)
 	if err != nil {
 		return fmt.Errorf("failed to read rp_filter for device %s: %w", name, err)
 	}
-	if strings.TrimSpace(string(current)) == rpFilterLooseMode {
+	if strings.TrimSpace(string(current)) == value {
 		return nil
 	}
-	if err := os.WriteFile(path, []byte(rpFilterLooseMode), 0o644); err != nil {
-		return fmt.Errorf("failed to set rp_filter loose mode for device %s: %w", name, err)
+	if err := os.WriteFile(path, []byte(value), 0o644); err != nil {
+		return fmt.Errorf("failed to set rp_filter=%s for device %s: %w", value, name, err)
 	}
-	klog.V(5).Infof("NetlinkDeviceManager: set rp_filter loose mode for device %s", name)
+	klog.V(5).Infof("NetlinkDeviceManager: set rp_filter=%s for device %s", value, name)
 	return nil
 }
 

@@ -208,6 +208,21 @@ type DeviceConfig struct {
 	// Because reconciliation always runs after the device exists in the kernel,
 	// this is race-free with respect to asynchronous device creation.
 	RPFilterLoose bool
+
+	// RPFilterDisable, when true, fully disables the device's IPv4 reverse-path
+	// filter (net.ipv4.conf.<device>.rp_filter = 0) and also clears the node-global
+	// net.ipv4.conf.all.rp_filter, because the effective rp_filter for a device is
+	// max(conf.all, conf.<device>): a per-device 0 has no effect while conf.all is
+	// non-zero.
+	//
+	// This is stronger than RPFilterLoose and is required for the EVPN CNC L3VNI
+	// SVIs (cvl3.<hash>, svl3.<n>) that receive VXLAN-decapped inter-UDN transit.
+	// Their reverse route for the source resolves out a VRF master device (an
+	// l3mdev table redirect, e.g. "dev evpn-l2l3-gamma"), which fib_validate_source
+	// does not accept as a valid reverse path even in loose mode, so only fully
+	// disabling rp_filter allows the asymmetric hub-and-spoke path to forward.
+	// Takes precedence over RPFilterLoose when both are set. No-op for IPv6.
+	RPFilterDisable bool
 }
 
 // VIDVNIMapping represents a single VID↔VNI mapping for bridge VXLAN configuration.
