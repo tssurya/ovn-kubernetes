@@ -678,7 +678,7 @@ func (c *Controller) collectCNCConnectedSubnets() (map[string][]*net.IPNet, erro
 		var subnets []*net.IPNet
 		// vtepName is empty: exemptions are node-global, so gather subnets from every
 		// EVPN network the CNC connects regardless of which VTEP it uses.
-		err := c.forEachCNCEVPNNetwork(cnc, "", func(network util.NetInfo) bool {
+		_, err := c.forEachCNCEVPNNetwork(cnc, "", func(network util.NetInfo) bool {
 			for _, entry := range network.Subnets() {
 				if entry.CIDR != nil {
 					subnets = append(subnets, entry.CIDR)
@@ -762,7 +762,7 @@ func (c *Controller) collectCNCParentVRFConfigs(vtepName string) ([]*cncParentVR
 // then checks EVPNVTEPName() against vtepName via the networkManager.
 func (c *Controller) cncUsesVTEP(cnc *networkconnectv1.ClusterNetworkConnect, vtepName string) (bool, error) {
 	var uses bool
-	err := c.forEachCNCEVPNNetwork(cnc, vtepName, func(util.NetInfo) bool {
+	_, err := c.forEachCNCEVPNNetwork(cnc, vtepName, func(util.NetInfo) bool {
 		uses = true
 		return false // stop at the first match
 	})
@@ -776,18 +776,26 @@ func (c *Controller) cncUsesVTEP(cnc *networkconnectv1.ClusterNetworkConnect, vt
 // node-global isolation-exemption reconcile). fn returns false to stop iteration
 // early. PrimaryUserDefinedNetworks selectors are ignored: namespace-scoped UDNs do
 // not support EVPN transport.
-func (c *Controller) forEachCNCEVPNNetwork(cnc *networkconnectv1.ClusterNetworkConnect, vtepName string, fn func(util.NetInfo) bool) error {
+//
+// It also returns the number of selected CUDN-owned NADs whose NetInfo is not yet
+// registered in the networkManager. Network registration lags NAD creation, so a
+// NAD can be present while its network (and thus its pod subnets and VTEP binding)
+// is still unknown. Callers that need the CNC's complete connected set (e.g. sibling
+// route programming) use this count to defer and requeue rather than act on a partial
+// view; callers that only probe for a match (e.g. cncUsesVTEP) may ignore it.
+func (c *Controller) forEachCNCEVPNNetwork(cnc *networkconnectv1.ClusterNetworkConnect, vtepName string, fn func(util.NetInfo) bool) (int, error) {
+	pending := 0
 	for _, selector := range cnc.Spec.NetworkSelectors {
 		if selector.NetworkSelectionType != apitypes.ClusterUserDefinedNetworks {
 			continue
 		}
 		networkSelector, err := metav1.LabelSelectorAsSelector(&selector.ClusterUserDefinedNetworkSelector.NetworkSelector)
 		if err != nil {
-			return fmt.Errorf("failed to parse CUDN selector: %w", err)
+			return pending, fmt.Errorf("failed to parse CUDN selector: %w", err)
 		}
 		nads, err := c.nadLister.List(networkSelector)
 		if err != nil {
-			return fmt.Errorf("failed to list NADs: %w", err)
+			return pending, fmt.Errorf("failed to list NADs: %w", err)
 		}
 		for _, nad := range nads {
 			owner := metav1.GetControllerOfNoCopy(nad)
@@ -795,7 +803,14 @@ func (c *Controller) forEachCNCEVPNNetwork(cnc *networkconnectv1.ClusterNetworkC
 				continue
 			}
 			network := c.networkMgr.GetNetInfoForNADKey(nad.Namespace + "/" + nad.Name)
-			if network == nil || network.EVPNVTEPName() == "" {
+			if network == nil {
+				// The NAD exists but its network is not yet registered in the
+				// networkManager (registration lags NAD creation). Its subnets and
+				// VTEP binding are unknown, so report it as pending.
+				pending++
+				continue
+			}
+			if network.EVPNVTEPName() == "" {
 				// Not an EVPN network.
 				continue
 			}
@@ -803,11 +818,11 @@ func (c *Controller) forEachCNCEVPNNetwork(cnc *networkconnectv1.ClusterNetworkC
 				continue
 			}
 			if !fn(network) {
-				return nil
+				return pending, nil
 			}
 		}
 	}
-	return nil
+	return pending, nil
 }
 
 // collectMACVRFParentVRFMap returns, for each MAC-VRF-only (Layer2, no IP-VRF) EVPN
@@ -839,7 +854,7 @@ func (c *Controller) collectMACVRFParentVRFMap(vtepName string) (map[string]stri
 			continue
 		}
 		parentVRF := util.GetCNCParentVRFName(cnc.Name)
-		err = c.forEachCNCEVPNNetwork(cnc, vtepName, func(network util.NetInfo) bool {
+		_, err = c.forEachCNCEVPNNetwork(cnc, vtepName, func(network util.NetInfo) bool {
 			// MAC-VRF-only: has a MAC-VRF VID but no IP-VRF VID of its own.
 			if network.EVPNMACVRFVID() != 0 && network.EVPNIPVRFVID() == 0 {
 				result[util.GetNetworkVRFName(network)] = parentVRF
@@ -980,7 +995,7 @@ func (c *Controller) reconcileCNCSiblingRoutes(vtepName string) error {
 		}
 		var nets []cncNet
 		ownerSubnets := make(map[string][]*net.IPNet)
-		err = c.forEachCNCEVPNNetwork(cnc, vtepName, func(network util.NetInfo) bool {
+		pending, err := c.forEachCNCEVPNNetwork(cnc, vtepName, func(network util.NetInfo) bool {
 			networkID := network.GetNetworkID()
 			owner := util.ComputeNetworkOwner(network.TopologyType(), networkID)
 			nets = append(nets, cncNet{networkID: networkID, owner: owner})
@@ -993,6 +1008,18 @@ func (c *Controller) reconcileCNCSiblingRoutes(vtepName string) error {
 		})
 		if err != nil {
 			return err
+		}
+		// A connected network's NAD exists but its NetInfo is not yet registered in the
+		// networkManager, so its pod subnets are unknown. Programming now would install
+		// an incomplete sibling set (missing routes to/from the unresolved network) and
+		// nothing else re-triggers this reconcile once the network resolves, since the
+		// NAD reconciler requeues the VTEP at most once per NAD. Defer the whole CNC:
+		// carry forward any routes already programmed and requeue until every connected
+		// network resolves.
+		if pending > 0 {
+			klog.V(4).Infof("VTEP %s: CNC %s has %d connected network(s) pending registration, deferring sibling routes", vtepName, cnc.Name, pending)
+			notReady.Insert(cnc.Name)
+			continue
 		}
 
 		// Program, in each local network's VRF table, a route to every sibling
